@@ -26,7 +26,8 @@ The package consists of the following scripts:
 | [new](./new) | The NetWork Event Watcher main script. |
 | [getmyip](./getmyip) | Determines the system's IP address, in various flavours. |
 | [getwifinetworks](./getwifinetworks) | Determines the names (SSIDs) of any connected WiFi networks. |
-| [getnwinterfaces](./getnwinterfaces) | Determines the names of the systems network interfaces, in various flavours. |
+| [getnwinterfaces](./getnwinterfaces) | Determines the names of the system's network interfaces, in various flavours. |
+| [getNwEnv](./getNwEnv) | An example getNwEnv script. |
 
 ## Dependencies
 

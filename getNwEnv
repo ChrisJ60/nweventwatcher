@@ -1,0 +1,769 @@
+#!/bin/bash
+
+#
+# Copyright (c) Chris Jenkins 2019
+#
+# Licensed under the Universal Permissive License v 1.0 as shown
+# at http://oss.oracle.com/licenses/upl
+#
+
+export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+
+#
+# Some constants
+#
+
+declare -r tmpTemplate="/tmp/gne.XXXXXX"
+declare -r stNone="N"
+declare -r stEthernet="E"
+declare -r stWiFi="W"
+declare -r stUSB="U"
+declare -r stBluetooth="B"
+declare -r stVPN="V"
+
+#
+# The supported environments
+#
+
+declare -ri numEnvs=13
+declare -a envName
+declare -a envStype
+declare -a envDesc
+
+
+#
+# Environment names
+#
+
+envName[0]="None"
+envName[1]="Home-LAN"
+envName[2]="Home-WiFi"
+envName[3]="Work-LAN"
+envName[4]="Work-WiFi-Internal"
+envName[5]="Work-WiFi-Public"
+envName[6]="Home-Guest"
+envName[7]="iPhone-WiFi"
+envName[8]="iPad-WiFi"
+envName[9]="iPhone-USB_BT"
+envName[10]="Home-VPN"
+envName[11]="Work-VPN"
+envName[12]="Nord-VPN"
+
+#
+# Environment descriptions
+#
+
+envDesc[0]="No active network connections"
+envDesc[1]="Wired connection to the Home network"
+envDesc[2]="Connection to the Home WiFi network"
+envDesc[3]="Wired connection to the Work network"
+envDesc[4]="Connection to the Work Corporate WiFi network"
+envDesc[5]="Connection to the Work Public WiFi network"
+envDesc[6]="Connection to the Home Guest WiFi network"
+envDesc[7]="Tethered to iPhone via WiFi"
+envDesc[8]="Tethered to iPad via WiFi"
+envDesc[9]="Tethered to iPhone or iPad via USB or Bluetooth"
+envDesc[10]="Connection to Home VPN"
+envDesc[11]="Connection to Work VPN"
+envDesc[12]="Connection to Nord VPN"
+
+#
+# Environment types
+#
+
+envSrvType[0]=${stNone}
+envSrvType[1]=${stEthernet}
+envSrvType[2]=${stWiFi}
+envSrvType[3]=${stEthernet}
+envSrvType[4]=${stWiFi}
+envSrvType[5]=${stWiFi}
+envSrvType[6]=${stWiFi}
+envSrvType[7]=${stWiFi}
+envSrvType[8]=${stWiFi}
+envSrvType[9]=${stUSB}
+envSrvType[10]=${stVPN}
+envSrvType[11]=${stVPN}
+envSrvType[12]=${stVPN}
+
+#
+# macOS network service info
+#
+
+declare -ri numMatchEntries=9
+declare -a matchString
+declare -a matchType
+declare -a matchIface
+matchString[0]="Ethernet"
+matchType[0]="${stEthernet}"
+matchIface[0]=""
+matchString[1]="USB-C LAN"
+matchType[1]="${stEthernet}"
+matchIface[1]=""
+matchString[2]="Wi-Fi"
+matchType[2]="${stWiFi}"
+matchIface[2]=""
+matchString[3]="iPhone USB"
+matchType[3]="${stUSB}"
+matchIface[3]=""
+matchString[4]="iPad USB"
+matchType[4]="${stUSB}"
+matchIface[4]=""
+matchString[5]="Bluetooth PAN"
+matchType[5]="${stBluetooth}"
+matchIface[5]=""
+matchString[6]="L2TP"
+matchType[6]="${stVPN}"
+matchIface[6]="ppp0"
+matchString[7]="Cisco VPN"
+matchType[7]="${stVPN}"
+matchIface[7]="utun0"
+matchString[8]="Nord VPN"
+matchType[8]="${stVPN}"
+matchIface[8]="ipsec0"
+
+# Service data for Cisco AnyConnect VPN / OpenConnect VPN
+declare -r pathAnyConnect="/Applications/Cisco/Cisco AnyConnect Secure Mobility Client.app"
+declare -r pathOpenConnect="/Applications/OpenConnect VPN.app"
+declare -r infoAnyConnect="(1) AnyConnect VPN
+(Hardware Port: Cisco VPN, Device: utun0)"
+
+# Service data for Nord VPN
+declare -r pathNordVPN="/Applications/NordVPN.app"
+declare -r infoNordVPN="(1) Nord VPN
+(Hardware Port: Nord VPN, Device: utun0)"
+
+# Service data for Nord VPN IKE
+declare -r pathNordVPNIKE="/Applications/NordVPN IKE.app"
+declare -r infoNordVPNIKE="(1) Nord VPN IKE
+(Hardware Port: Nord VPN IKE, Device: ipsec0)"
+
+# Service data for Shimo VPN using OpenVPN
+declare -r pathShimo="/Applications/Shimo.app"
+declare -r infoShimo="(1) Shimo VPN
+(Hardware Port: OpenVPN, Device: utun0)"
+
+declare -r localv6pfx="fd00::"
+
+declare -ir minService=1
+declare -ir maxService=9
+declare -i numServices=0
+declare -a srvType
+declare -a srvName
+declare -a srvIface
+declare -ai srvActive
+declare -i vpnConfigured=1
+
+#
+# IP matching environments
+#
+
+declare -a getIPcmd
+declare -a ipCheckPrefix
+declare -ai ipEnvInd
+declare -ri numIpItems=7
+
+#
+# IP Prefixes (v4 or v6)
+#
+
+# WorkVPN, v6 only
+ipCheckPrefix[0]="2606:b400:8f0:"
+# HomeLAN, v6 only
+ipCheckPrefix[1]="2001:470:1f09:2df:"
+# WorkLAN, v6 only
+ipCheckPrefix[2]="2606:b400:"
+# iPhone USB or BT, v4 only
+ipCheckPrefix[3]="172.20.10."
+# HomeVPN, v4 only
+ipCheckPrefix[4]="10.10.200."
+ipCheckPrefix[5]="10.50.200."
+# NordVPN, v4 only
+ipCheckPrefix[6]="10."
+
+#
+# Associated 'getmyip' commands
+#
+
+# WorkVPN, v6 only
+getIPcmd[0]="getmyip vpn -6 -g"
+# HomeLAN, v6 only
+getIPcmd[1]="getmyip wired -6 -g"
+# WorkLAN, v6 only
+getIPcmd[2]="getmyip wired -6 -g"
+# iPhone USB or BT, v4 only
+getIPcmd[3]="getmyip wired -4"
+# HomeVPN, v4 only
+getIPcmd[4]="getmyip vpn -4"
+getIPcmd[5]="getmyip vpn -4"
+# NordVPN, v4 only
+getIPcmd[6]="getmyip vpn -4"
+
+#
+# Map matched environments to defined environments
+#
+
+# WorkVPN, v6 only
+ipEnvInd[0]=11
+# HomeLAN, v6 only
+ipEnvInd[1]=1
+# WorkLAN, v6 only
+ipEnvInd[2]=3
+# iPhone USB or BT, v4 only
+ipEnvInd[3]=9
+# HomeVPN, v4 only
+ipEnvInd[4]=10
+ipEnvInd[5]=10
+# NordVPN, v4 only
+ipEnvInd[6]=12
+
+#
+# WiFi matched environments
+#
+
+declare -a getWIFIcmd
+declare -a wifiNwName
+declare -ai wifiEnvInd
+declare -ir numWiFiItems=6
+
+#
+# Command to determine SSID
+#
+
+getWIFIcmd[0]="getwifinetworks"
+getWIFIcmd[1]="getwifinetworks"
+getWIFIcmd[2]="getwifinetworks"
+getWIFIcmd[3]="getwifinetworks"
+getWIFIcmd[4]="getwifinetworks"
+getWIFIcmd[5]="getwifinetworks"
+
+#
+# Network name SSID
+#
+
+wifiNwName[0]="Home WiFi"
+wifiNwName[1]="Work WiFi Corporate"
+wifiNwName[2]="Work WiFi Public"
+wifiNwName[3]="My iPhone"
+wifiNwName[4]="My iPad"
+wifiNwName[5]="Guest WiFi"
+
+#
+# Map SSID to environment
+#
+
+wifiEnvInd[0]=2
+wifiEnvInd[1]=4
+wifiEnvInd[2]=5
+wifiEnvInd[3]=7
+wifiEnvInd[4]=8
+wifiEnvInd[5]=6
+
+
+declare cmd=""
+declare -i ret=1
+declare -i doAll=1
+declare -i foundMatch=1
+
+usage()
+{
+     echo
+     echo "Usage:"
+     echo
+     echo "  getNwEnv help"
+     echo "  getNwEnv show [-all]"
+     echo "  getNwEnv list [-verbose]"
+     echo
+     echo "Displays the name(s) of the currently active recognised network environment(s)."
+     echo "If '-all' is specified, lists all active environments otherwise lists just"
+     echo "the primary one."
+     echo
+     if [[ $# -gt 0 ]]
+     then
+     echo "Recognised environments and their names are:"
+     echo
+     echo "    None          -  No active network connections"
+     echo
+     echo "    Home-VPN      -  Connected to Home VPN."
+     echo
+     echo "    Work-VPN      -  Connected to Work VPN."
+     echo
+     echo "    Nord-VPN      -  Connected to Nord VPN."
+     echo
+     echo "    Home-LAN      -  A wired connection to the Home network."
+     echo
+     echo "    Home-WiFi     -  A WiFi connection to the Home network."
+     echo
+     echo "    Home-Guest    -  A WiFi connection to the Home guest network."
+     echo
+     echo "    iPhone-USB_BT -  Tethered to iPhone/iPad via USB or Bluetooth."
+     echo
+     echo "    iPhone-WiFi   -  Tethered to iPhone via WiFi."
+     echo
+     echo "    iPad-WiFi     -  Tethered to iPad via WiFi."
+     echo
+     echo "    Work-LAN      -  A wired connection to the Oracle network."
+     echo
+     echo "    Work-WiFi-Internal"
+     echo "                  -  Connected to work corporate WiFi network"
+     echo
+     echo "    Work-WiFi-Public"
+     echo "                  -  Connected to work public WiFi network."
+     echo
+     echo "If at least one recognised environment is listed the exit code is 0 otherwise"
+     echo "it is > 0."
+     echo
+     fi
+     exit 2
+}
+
+listEnvs()
+{
+    local prev=""
+    local -i n=0
+    local -i verbose=1
+
+    if [[ $# -gt 0 ]]
+    then
+        verbose=0
+    fi
+
+    while [[ ${n} -lt ${numEnvs} ]]
+    do
+        if [[ "${envName[${n}]}" != "${prev}" ]]
+        then
+            if [[ ${verbose} -eq 0 ]]
+            then
+                echo "${envName[${n}]}:${envDesc[${n}]}"
+            else
+                echo "${envName[${n}]}"
+            fi
+        fi
+        prev="${envName[${n}]}"
+        n=${n}+1
+    done
+
+    return 0
+}
+
+getV4Address()
+{
+    local -i ret=0
+    local addr=""
+
+    if [[ $# -eq 1 ]]
+    then
+        addr=`ifconfig "$1" 2>/dev/null | grep "inet " | sed -e 's/.*inet //' -e 's/ netmask.*$//' -e 's/ --> .*//'`
+    fi
+
+    if [[ "${addr}" != "" ]]
+    then
+        echo ${addr}
+    else
+        ret=1
+    fi
+
+    return ${ret}
+}
+
+getV6Address()
+{
+    local -i ret=0
+    local addr=""
+
+    if [[ $# -eq 1 ]]
+    then
+        addr=`ifconfig "$1" 2>/dev/null | grep "inet6 " | grep -v " scopeid " | grep -v "temporary" | grep -v "${localv6pfx}" | sed -e 's/.*inet6 //' -e 's/ prefixlen.*$//'`
+    fi
+
+    if [[ "${addr}" != "" ]]
+    then
+        echo ${addr}
+    else
+        ret=1
+    fi
+
+    return ${ret}
+}
+
+addService()
+{
+    local sType
+    local sName
+    local sIface
+    local -i n=0
+
+    sType="${matchType[$1]}"
+    sName=`echo "$2" | head -n 1 | sed -e 's/^([0-9]*) //'`
+    if [[ "${matchIface[$1]}" != "" ]]
+    then
+        sIface="${matchIface[$1]}"
+    else
+        sIface=`echo "$2" | tail -n 1 | sed -e 's/^.* Device: //' -e 's/).*$//'`
+    fi
+    while [[ ${n} -lt ${numServices} ]]
+    do
+        if [[ "${sIface}" == "${srvIface[${n}]}" ]]
+        then
+            return 0
+        fi
+        n=${n}+1
+    done
+
+    srvType[${numServices}]="${sType}"
+    if [[ "${sType}" == "${stVPN}" ]]
+    then
+        vpnConfigured=0
+    fi
+    srvName[${numServices}]="${sName}"
+    srvIface[${numServices}]="${sIface}"
+    srvActive[${numServices}]=1
+    getV6Address "${srvIface[${numServices}]}" >& /dev/null
+    if [[ $? -eq 0 ]]
+    then
+        srvActive[${numServices}]=0
+    else
+        getV4Address "${srvIface[${numServices}]}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            srvActive[${numServices}]=0
+        fi
+    fi
+    numServices=${numServices}+1
+
+    return 0
+}
+
+getServices()
+{
+    local tmpf=""
+    local srvinfo
+    local -i n=${minService}
+    local -i i=0
+
+    tmpf=`mktemp -q "${tmpTemplate}"`
+    if [[ "${tmpf}" = "" ]]
+    then
+        return 1
+    fi
+    networksetup -listnetworkserviceorder 2>/dev/null | grep '^(' > "${tmpf}"
+
+    while [[ ${n} -le ${maxService} ]]
+    do
+        srvinfo=`sed -e "/^(${n})/,/^(H/!d" < "${tmpf}"`
+        if [[ "${srvinfo}" != "" ]]
+        then
+            i=0
+            while [[ ${i} -lt ${numMatchEntries} ]]
+            do
+               echo "${srvinfo}" | grep -q "Hardware Port: .*${matchString[${i}]}"
+               if [[ $? -eq 0 ]]
+               then
+                   addService ${i} "${srvinfo}"
+                   i=${numMatchEntries}
+               else
+                   i=${i}+1
+               fi
+            done
+        fi
+        n=${n}+1
+    done
+
+    if [[ -d "${pathAnyConnect}" ]] || \
+       [[ -d "${pathOpenConnect}" ]]
+    then
+        i=${numMatchEntries}-2
+        srvinfo="${infoAnyConnect}"
+        addService ${i} "${srvinfo}"
+    fi
+
+    if [[ -d "${pathNordVPN}" ]]
+    then
+        i=${numMatchEntries}-2
+        srvinfo="${infoNordVPN}"
+        addService ${i} "${srvinfo}"
+    fi
+
+    if [[ -d "${pathNordVPNIKE}" ]]
+    then
+        i=${numMatchEntries}-1
+        srvinfo="${infoNordVPNIKE}"
+        addService ${i} "${srvinfo}"
+    fi
+
+    if [[ -d "${pathShimo}" ]]
+    then
+        i=${numMatchEntries}-3
+        srvinfo="${infoShimo}"
+        addService ${i} "${srvinfo}"
+    fi
+
+    rm -f "${tmpf}" >/dev/null 2>&1
+    return 0
+}
+
+prefixMatches()
+{
+    local ip="$1"
+    local pfx="$2"
+    local -i ret
+
+    echo "${ip}" | grep -q "^${pfx}" >/dev/null 2>&1
+    ret=$?
+
+    return ${ret}
+}
+
+checkIPmatches()
+{
+    local ipaddr
+    local -i ret=1
+    local -i vpn=$2
+    local -i n=0
+
+    while [[ ${n} -lt ${numIpItems} ]]
+    do
+        if [[ $# -gt 0 ]]
+        then
+            ipaddr="$1"
+        else
+            ipaddr=`${getIPcmd[${n}]}`
+        fi
+        if [[ $? -eq 0 ]]
+        then
+            if prefixMatches "${ipaddr}" "${ipCheckPrefix[${n}]}"
+            then
+                if [[ ${vpn} -eq 0 ]] && \
+                   [[ ${envSrvType[${ipEnvInd[${n}]}]} == ${stVPN} ]]
+                then
+                    foundMatch=0
+                    ret=0
+                    echo "${envName[${ipEnvInd[${n}]}]}"
+                    n=${numIpItems}
+                elif [[ ${vpn} -eq 1 ]] && \
+                     [[ ${envSrvType[${ipEnvInd[${n}]}]} != ${stVPN} ]]
+                then
+                    foundMatch=0
+                    ret=0
+                    echo "${envName[${ipEnvInd[${n}]}]}"
+                    n=${numIpItems}
+                fi
+            fi
+        fi
+        n=${n}+1
+    done
+
+    return ${ret}
+}
+
+checkWiFiMatches()
+{
+    local wifinm
+    local -i ret=1
+    local -i n=0
+
+    while [[ ${n} -lt ${numWiFiItems} ]]
+    do
+        if [[ $# -gt 0 ]]
+        then
+            wifinm="$1"
+        else
+            wifinm=`${getWIFIcmd[${n}]}`
+        fi
+        if [[ $? -eq 0 ]]
+        then
+            if [[ "${wifinm}" = "${wifiNwName[${n}]}" ]]
+            then
+                foundMatch=0
+                ret=0
+                echo "${envName[${wifiEnvInd[${n}]}]}"
+                n=${numWiFiItems}
+            fi
+        fi
+        n=${n}+1
+    done
+
+    return ${ret}
+}
+
+checkVPNActive()
+{
+    local -i n=0
+    local ipaddr=""
+    local vpnif=""
+
+     for vpnif in `getnwinterfaces vpn -active`
+     do
+        ipaddr=`getV6Address "${vpnif}"`
+        if [[ "${ipaddr}" == "" ]]
+        then
+            ipaddr=`getV4Address "${vpnif}"`
+        fi
+        if [[ "${ipaddr}" != "" ]]
+        then
+            checkIPmatches "${ipaddr}" 0
+        fi
+        if [[ ${foundMatch} -eq 0 ]] && [[ ${doAll} -eq 1 ]]
+        then
+            return 0
+        fi
+     done
+
+    return 0
+}
+
+checkActive()
+{
+    local -i n=0
+    local -i done
+    local ipaddr=""
+    local nwname=""
+
+    if [[ ${foundMatch} -eq 1 ]] || [[ ${doAll} -eq 0 ]]
+    then
+        done=1
+    else
+        done=0
+    fi
+    while [[ ${n} -lt ${numServices} ]] && [[  ${done} -ne 0 ]]
+    do
+        if [[ ${srvActive[${n}]} -eq 0 ]]
+        then
+            case "${srvType[${n}]}" in
+
+                ${stEthernet}|${stUSB}|${stBluetooth})
+                    ipaddr=`getV6Address "${srvIface[${n}]}"`
+                    if [[ "${ipaddr}" == "" ]]
+                    then
+                        ipaddr=`getV4Address "${srvIface[${n}]}"`
+                    fi
+                    if [[ "${ipaddr}" != "" ]]
+                    then
+                        checkIPmatches "${ipaddr}" 1
+                    fi
+                    ;;
+
+                ${stWiFi})
+                    nwname=`networksetup -getairportnetwork "${srvIface[${n}]}" 2>/dev/null | grep '^Current Wi-Fi Network:' | sed -e 's/^Current Wi-Fi Network: //'`
+                    if [[ "${nwname}" != "" ]]
+                    then
+                        checkWiFiMatches "${nwname}"
+                    fi
+                    ;;
+
+            esac
+        fi
+
+        n=${n}+1
+
+        if [[ ${foundMatch} -eq 1 ]] || [[ ${doAll} -eq 0 ]]
+        then
+            done=1
+        else
+            done=0
+        fi
+    done
+
+    return 0
+}
+
+doShow()
+{
+    local -i doAll=1
+    local -i ret=1
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    elif [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-all" ]]
+        then
+            doAll=0
+        else
+            usage
+        fi
+    fi
+
+    getServices
+
+    if [[ ${vpnConfigured} -eq 0 ]]
+    then
+        checkVPNActive
+    fi
+
+    if [[ ${foundMatch} -eq 1 ]] || [[ ${doAll} -eq 0 ]]
+    then
+        checkActive
+    fi
+
+    if [[ ${foundMatch} -eq 0 ]]
+    then
+        ret=0
+    fi
+
+    if [[ ${ret} -eq 1 ]]
+    then
+        if ! getnwinterfaces all -active >& /dev/null
+        then
+            echo "${envName[0]}"
+            ret=0
+        fi
+    fi
+    
+    return ${ret}
+}
+
+doList()
+{
+    local -i doVerbose=1
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    elif [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-verbose" ]]
+        then
+            doVerbose=0
+        else
+            usage
+        fi
+    fi
+
+    if [[ ${doVerbose} -eq 0 ]]
+    then
+        listEnvs Y
+    else
+        listEnvs
+    fi
+
+    return 0
+}
+
+if [[ $# -eq 0 ]]
+then
+    usage
+fi
+
+cmd="$1"
+shift
+
+case "${cmd}" in
+    "show")
+        doShow "$@"
+        ret=$?
+        ;;
+    "list")
+        doList "$@"
+        ret=$?
+        ;;
+    "help")
+        usage Y
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+exit ${ret}
+
