@@ -1,4 +1,4 @@
-NETWORK EVENT WATCHER
+**NETWORK EVENT WATCHER**
 
 Watch for, and react to, changes of network environment and system wake events.
 
@@ -16,7 +16,7 @@ and changes of power source (battery or AC).
 When one of the monitored events occurs, the utility can perform a user defined
 action to react to the event.
 
-DEPENDENCIES
+**DEPENDENCIES**
 
 This utility uses:
 
@@ -51,7 +51,7 @@ This utility uses:
      - Detection of power source changes is not enabled so the '@battery'
        environment will not trigger any events.
 
-INSTALLATION
+**INSTALLATION**
 
 1.  Make sure that your PATH setting includes both /usr/local/bin and
     /usr/local/sbin.
@@ -73,17 +73,17 @@ INSTALLATION
     it will use a less reliable mechanism to detect system wakes which
     may occasionally result in missed events or false positives.
 
-CONFIGURATION, STORAGE AND RESTRICTIONS
+**CONFIGURATION, STORAGE AND RESTRICTIONS**
 
 The utility stores its configuration and a few other small files in
 '~/Library/Application Support/NwEventWatcher' hence all aspects of
 configuration and operation are specific to an individual user.
 Different users can have different configurations but only one
-user's monitor/agent may be running at any one time.
+user's monitor/agent should be running at any one time.
 
-CONCEPTS
+**CONCEPTS**
 
-Environment
+_Environment_
 
 A specific network environment. The list of supported environments
 is that returned by executing 'getNwEnv list'. In addition to the
@@ -102,7 +102,7 @@ Unknown  - Matches any environment not specifically recognised
 @all     - Matches all defined environments, including 'Unknown',
           '@default', '@battery' and @awake.
 
-Event
+_Event_
 
 An event occurs when a network environment transitions to active (from
 being inactive) or vice versa. The current set of active environments
@@ -121,12 +121,12 @@ system running on battery power (as opposed to AC power).
 The A event for this environment occurs when the system switches
 from AC power to battery and the I event is the reverse of this.
 
-Action
+_Action_
 
 A command associated with an event. When the event is triggered the
 associated action, if any, is executed.
 
-EVENT DETECTION MECHANISM
+**EVENT DETECTION MECHANISM**
 
 The monitor task is responsible for detecting and reacting to events
 based on the configuration. The monitor can be run directly, either as
@@ -160,7 +160,7 @@ of these checks is determined by the '-interval' option (see below).
 The default interval is 10 seconds and this should be adequate
 for most situations.
 
-RESPONSIVENESS VERSUS RESOURCE USAGE
+**RESPONSIVENESS VERSUS RESOURCE USAGE**
 
 Under typical usage conditions the monitor task and associated helper
 tasks use very little CPU (roughly 0.5% of a single core on average).
@@ -177,7 +177,7 @@ only a modest reduction in responsiveness. You can tune the values used
 in both modes by using the '-acsq' and '-btsq' parameters of the 'config'
 command. Values range between 1 and 5.
 
-ACTION EXECUTION AND ORDERING
+**ACTION EXECUTION AND ORDERING**
 
 It is possible that multiple events may occur at the same time (or so close
 together that they effectively occur at the same time). In such cases there
@@ -197,15 +197,14 @@ is a clearly defined order of execution for their associated actions.
 -   If there are no defined actions for an event then the event is ignored; you
     do not need to define actions for every possible event. You can also create
     actions for the special environment named '@default'. These actions will
-    then trigger for any event which does not have its own defined actions,
-    except for the '@awake' event.
+    then trigger for any event which does not have its own defined actions.
 
 Actions execute synchronously to the monitor. While an action is executing
 the monitor will not detect any new events, but in general new events which
 occur during action execution will be queued and will be detected/processed
 after the current set of actions have finished processing.
 
-ACTION COMMAND EXECUTION ENVIRONMENT
+**ACTION COMMAND EXECUTION ENVIRONMENT**
 
 Action commands are executed as background tasks. They should make no
 assumptions about their environment other than as follows:
@@ -221,7 +220,7 @@ log file defined then standard output and standard error will be redirected
 to the log file otherwise they will be redirected to /dev/null. There is
 no controlling terminal.
 
-ACTION COMMANDS
+**ACTION COMMANDS**
 
 When assigning commands to actions, or creating scripts to be used
 as action commands, bear in mind the following:
@@ -244,27 +243,27 @@ as action commands, bear in mind the following:
 -  Generally A events are more useful than I events since they are
    more definitive. Nonetheless I events can sometimes be useful.
 
-USAGE
+**USAGE**
 
   new version
 
   new list {environments [-verbose] | actions [-script] | active}
 
-  new set environment {a | i | b} [-silent] command [param]...
+  new set environment {a | i | b} [-silent] *command* [*param*]...
 
   new set environment {a | i | b} -notify
 
   new clear environment {a | i | b} [-verbose]
 
-  new config [-clear | [-warntimeout w] [-killtimeout k]
-             [-actionlog path] [-acsq a] [-btsq b]
-             [-maxlogs l]]
+  new config [-clear | [-warntimeout *w*] [-killtimeout *k*]
+             [-actionlog *path*] [-acsq *a*] [-btsq *b*]
+             [-maxlogs *l*]]
 
   new init
 
   new refresh [-force]
 
-  new install [agenturl] [-settle s] [-interval i] [-notify]
+  new install [*agenturl*] [-settle *s*] [-interval *i*] [-notify]
 
   new uninstall
 
@@ -278,9 +277,9 @@ USAGE
 
   new log [-action] [-follow|-clear|-info|-rotate]
 
-  new monitor [-settle s] [-interval i] [-notify] [-fg]
+  new monitor [-settle *s*] [-interval *i*] [-notify] [-fg]
 
-list {environments [-verbose] | actions [-script] | active}
+**list {environments [-verbose] | actions [-script] | active}**
 
 Displays a list of environment names, defined actions or the currently
 active environments (except '@awake'). For actions, if '-script' is
@@ -292,7 +291,7 @@ configuration which may not be the same as the in-memory copy currently
 being used by a running monitor/agent. See 'set', 'clear' and 'refresh'
 below.
 
-set environment {a | i | b} [-silent] command [param]...
+**set environment {a | i | b} [-silent] *command* [*param*]...**
 
 Creates an action; sets a command to be executed when an event is triggered
 for the named environment. Events are:
@@ -307,14 +306,14 @@ Note that 'b' is not a separate event; it is simply a shorthand way of
 creating an action for both 'a' and 'i' events. Only 'a' events may be
 defined for the '@awake' environment.
 
-'command' must be an executable file (binary, script, ...) and may be
+'*command*' must be an executable file (binary, script, ...) and may be
 followed by optional parameters as required. The following special
 placeholders will be substituted for the corresponding values when the
 command is executed:
 
-  #E# - The environment name for the event.
+  **#E#**- The environment name for the event.
 
-  #A# - The new environment state for the event; A = active, I = inactive.
+  **#A#** - The new environment state for the event; A = active, I = inactive.
 
 An absolute path should always be used when specifying the command.
 
@@ -322,25 +321,25 @@ If macOS notifications are enabled then a notification will be sent
 whenever an event with an associated action is triggered occurs unless
 '-silent' was specified when the action was created.
 
-set environment {a | i | b} -notify
+**set environment {a | i | b} -notify**
 
 Sets a 'notify only' action for an event. No command is executed but a
 notification is sent if macOS notifications are enabled.
 
-NOTE:
+**NOTE:**
     If a monitor or agent is running, changes made with the 'set' command will
     not take effect until a 'refresh' command has been issued.
 
-clear environment {a | i | b} [-verbose]
+**clear environment {a | i | b} [-verbose]**
 
 Removes the specified action(s) for the named environment/event(s).
 
-NOTE:
+**NOTE:**
     If a monitor or agent is running, changes made with the 'clear' command will
     not take effect until a 'refresh' command has been issued.
 
-config [-clear | [-warntimeout w] [-killtimeout k] [-actionlog path]
-       [-acsq a] [-btsq b] [-maxlogs l]]
+**config [-clear | [-warntimeout *w*] [-killtimeout *k*] [-actionlog *path*]
+       [-acsq *a*] [-btsq *b*] [-maxlogs *l*]]**
 
 Sets values for the command execution warning timer (-warntimeout),
 the command execution kill timer (-killtimeout), the action log file
@@ -371,19 +370,19 @@ The 'maxlogs' value specifies the maximum number of log files to retain
 when using the log file rotation feature. The value must be between 1
 and 10. The default is 5.
 
-NOTE:
+**NOTE:**
     If a monitor or agent is running, changes made with the 'config' command
     will not take effect until a 'refresh' command has been issued.
 
-init
+**init**
 
-Sets up the configuration from scratch; clears all defined timeouts and
+Sets up the configuration from scratch; clears all defined config parameters and
 actions and regenerates the list of environments using 'getNwEnv list'.
 Any running monitor task or agent must be stopped before using this command.
 It is not usually necessary to use this command as an implicit 'init' is
 performed the very first time a user runs this utility.
 
-refresh [-force]
+**refresh [-force]**
 
 Tells a running monitor/agent to reload its configuration to pick up any
 pending changes. Normally the refresh is only performed if there are pending
@@ -391,7 +390,7 @@ changes but you can force it to occur by specifying '-force'. Starting the
 monitor/agent using the 'start' or 'monitor' commands performs an implicit
 refresh.
 
-install [agenturl] [-settle s] [-interval i] [-notify]
+**install [*agenturl*] [-settle *s*] [-interval *i*] [-notify]**
 
 Installs a user LaunchAgent so that the monitor runs as an agent whenever
 you are logged in. The agent must not be currently loaded in order to use
@@ -399,51 +398,51 @@ this command. This is the preferred way to use this utility.
 
 The options are:
 
-  agenturl
+  **agenturl**
   
   The URL to use for the launch agent. The default is 'com.jenkinsnet.netwatcher'.
 
-  -settle s
+  **-settle *s***
   
   Wait for 's' seconds before starting to monitor for changes after
   starting or waking from sleep.
   0 <= s <= 300. The default is 15.
 
-  -interval i
+  **-interval *i***
   
-  Check for changes every 'i' seconds when using 'polling' mode.
+  Check for events every 'i' seconds when using 'polling' mode.
   5 <= i <= 60. The default is 10.
 
-  -notify
+  **-notify**
   
   Enables the macOS notification feature. Requires the
-  'terminal-notifier' utility.
+  'terminal-notifier' utility to be installed.
 
-uninstall
+**uninstall**
 
 Uninstalls the user LaunchAgent so that the monitor no longer runs
 automatically. The agent must not be loaded in order to use this
 command.
 
-status [-verbose]
+**status [-verbose]**
 
 Displays the status of the monitor/agent. If '-verbose' is specified then
 status is also displayed for sleepwatcher, netwatcher and pending refresh.
 
-start
+**start**
 
 Starts the agent if it is configured and not already running.
 
-stop
+**stop**
 
 Stops the monitor/agent if it is running.
 
-cleanup
+**cleanup**
 
 Cleans up any residual helper processes. You should not normally need to
 use this option.
 
-log [-action] [-follow|-clear|-info|-rotate]
+**log [-action] [-follow|-clear|-info|-rotate]**
 
 Display, clear (-clear), give information about (-info) or rotate (-rotate)
 the monitor log or the action log (-action), if configured. Using '-follow'
@@ -454,52 +453,58 @@ Rotating a log renames the current log as <logname>.1 and so on up to a
 maximum of the configured value for 'maxlogs' set using the 'config' option.
 Logs exceeding 'maxlogs' are removed.
 
-monitor
+**monitor**
 
 Runs the monitor directly; useful for special purposes.
 
 The options are:
 
-  -settle s
+  **-settle *s***
   
   Wait for 's' seconds before starting to monitor for changes after
   starting or waking from sleep.
   0 <= s <= 300. The default is 15.
 
-  -interval i
+  **-interval *i***
   
-  Check for changes every 'i' seconds.
+  Check for events every 'i' seconds.
   5 <= i <= 60. The default is 10.
 
-  -notify
+  **-notify**
   
   Enables the macOS notification feature. Requires the
-  'terminal-notifier' utility.
+  'terminal-notifier' utility to be installed.
 
-  -fg
+  **-fg**
   
   Normally the monitor process is run as a separate background task.
   Specifying '-fg' causes it to be run in the foreground (in the
   invoking task).
 
-The getNwEnv script
+**THE GETNWENV SCRIPT**
 
-Overview
+_Overview_
 
 The user is responsible for providing a command (most likely a script) called
-'getNwEnv' which must be installed in either /usr/local/bin or /usr/local/sbin.
+'**getNwEnv**' which must be installed in either /usr/local/bin or /usr/local/sbin.
 
 This script is responsible for:
 
 -  Defining the names and descriptions of the set of supported network
    environments.
+   
+   The definition of what constitutes an 'environment' is left to the user but
+   typically it might be things like 'Connected to my Home WiFi', 'Connected to
+   my Work VPN', 'Tethered to my iPhone' and so on. 
 
 -  Determining the set of currently active network environments.
+
    The definition of Active and Inactive is deliberately left to the user
    but typically Active means connected/usable and Inactive means the opposite.
    A good example is a VPN connection; when it is not connected it is Inactive
    and when it is connected it becomes Active. The same example holds true for
-   WiFi and wired network connections.
+   WiFi and wired network connections. Multiple environments may be active
+   concurrently.
 
 Syntax and specification
 
