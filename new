@@ -1,0 +1,5426 @@
+#!/bin/bash
+
+#
+# Network Event Watcher. Copyright (c) Chris Jenkins 2019
+#
+# Licensed under the Universal Permissive License v 1.0 as shown
+# at http://oss.oracle.com/licenses/upl
+#
+
+declare -r version="2.7.6"
+declare -r copyright="Copyright (c) Chris Jenkins 2019"
+
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+
+declare -r ladir=~/Library/LaunchAgents
+declare -r dfltAgentName=com.jenkinsnet.netwatcher
+declare -r datadir=~/Library/Application\ Support/NwEventWatcher
+declare -r cfgdir=conf
+declare -r actdir=action
+declare -r tmpdir=tmp
+declare -r bindir=bin
+declare -r logdir=log
+declare -r logfile=nweventwatcher.txt
+declare -r envnames=envnames
+declare -r envdescs=envdescs
+declare -r warntimeout=warntimeout
+declare -r killtimeout=killtimeout
+declare -r acsqfile=acsq
+declare -r btsqfile=btsq
+declare -r numlogfile=numlog
+declare -r actionlog=actionlog
+declare -r lanamef=laname
+declare -r cmdfile=cmd
+declare -r pidfile=pid
+declare -r swpidfile=swpid
+declare -r nwpidfile=nwpid
+declare -r reffile=refresh
+declare -r envfile=actenv
+declare -r sleepfile=sleep
+declare -r wakefile=wake
+declare -r batteryfile=battery
+declare -r acpowerfile=acpower
+declare -r nwchangefile=nwchange
+declare -r notifyfile=notify
+declare -r nwname=netwatcher
+declare -r actions=" a i b "
+declare -r subenv="#E#"
+declare -r subact="#A#"
+declare -r envWake="@awake"
+declare -r envWakeDesc="Used to set actions on system wake"
+declare -r envBattery="@battery"
+declare -r envBatteryDesc="System is on battery power"
+declare -r envDefault="@default"
+declare -r envDefaultDesc="Used to set default actions"
+declare -r envAll="@all"
+declare -r envAllDesc="The set of all environments, including ${envDefault} but excluding ${envWake}"
+declare -r unknownname="Unknown"
+declare -r unknowndesc="Unknown network environment"
+declare -r notifybundle="com.apple.NetworkUtility"
+
+declare -ri minsleepsecs=5
+declare -ri rintr=127
+declare -ri minSettle=0
+declare -ri maxSettle=300
+declare -ri minInterval=5
+declare -ri maxInterval=60
+declare -ri minTimeout=0
+declare -ri maxTimeout=180
+declare -ri minWakeCheck=3
+declare -ri maxWakeCheck=15
+declare -ri minSleepQuantum=1
+declare -ri maxSleepQuantum=5
+declare -ri dfltAcSleepQuantum=1
+declare -ri dfltBtSleepQuantum=3
+declare -ri dfltWakeCheck=6
+declare -ri dfltSettle=15
+declare -ri dfltInterval=10
+declare -ri dfltWarnTimeout=30
+declare -ri dfltKillTimeout=60
+declare -ri minNumLogs=1
+declare -ri maxNumLogs=10
+declare -ri dfltNumLogs=5
+declare -ri eventModeSleep=60
+declare -ri swSettleFactor=20
+
+declare notifier=""
+declare sleepwatcher=""
+declare netwatcher=""
+declare cmd
+declare mypath
+declare me
+declare myuid
+declare mytmp
+declare mypid
+declare mylog
+
+declare -i enablePower=1
+declare -i acSQ=${dfltAcSleepQuantum}
+declare -i btSQ=${dfltBtSleepQuantum}
+declare -i sleepQuantum=${dfltAcSleepQuantum}
+declare -i useSW=0
+declare -i SWpid=0
+declare -i NWpid=0
+declare -i wakeCheckValue=${dfltWakeCheck}
+declare -i cmdkilltimeout=${dfltKillTimeout}
+declare -i cmdwarntimeout=${dfltWarnTimeout}
+declare -i maxlogs=${dfltNumLogs}
+declare -i slpTS=0
+declare -i wakeTS=0
+declare -i powerTS=0
+declare -i inSleep=1
+declare -i prvBattery=0
+declare -i curBattery=1
+declare -i eventTS=0
+declare -i intr=1
+declare -i refresh=1
+declare -i ret=0
+declare -i debug=1
+declare -i forcepoll=1
+
+#
+# State tracking variables and arrays
+#
+declare -i nEnv=0
+declare -a curEnv
+declare -a curA
+declare -a curI
+declare -ai curAN
+declare -ai curIN
+declare -ai curAct
+declare -ai prvAct
+declare dfltA
+declare dfltI
+declare -i dfltAN
+declare -i dfltIN
+declare wakeA
+declare wakeI
+declare -i wakeAN
+declare -i wakeIN
+declare powerA
+declare powerI
+declare -i powerAN
+declare -i powerIN
+
+usage()
+{
+    if [[ $# -gt 0 ]]
+    then
+    echo
+    echo "NETWORK EVENT WATCHER"
+    echo
+    echo "Watch for, and react to, changes of network environment and system wake events."
+    echo
+    echo "This utility monitors the system for changes in the network environment, such"
+    echo "as:"
+    echo
+    echo "-  Network interfaces appearing or disappearing"
+    echo "-  Network interfaces becoming active or inactive"
+    echo "-  Network interface IP addresses changing (IPv4 or IPv6)"
+    echo "-  VPN connections connecting or disconnecting"
+    echo
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "It also monitors for system wake events (i.e. the system wakes from sleep)"
+    echo "and changes of power source (battery or AC)."
+    else
+    echo "It also monitors for system wake events (i.e. the system wakes from sleep)."
+    fi
+    echo
+    echo "When one of the monitored events occurs, the utility can perform a user defined"
+    echo "action to react to the event."
+    echo
+    echo "DEPENDENCIES"
+    echo
+    echo "This utility uses:"
+    echo
+    echo "    1.   A 'getNwEnv' script which determines the currently active network"
+    echo "         environment(s) and defines the set of supported environments. This"
+    echo "         script must be provided by the user and must comply with the"
+    echo "         specification (see below)."
+    echo
+    echo "    2.   The 'terminal-notifier' utility which is used to send notifications"
+    echo "         (https://github.com/julienXX/terminal-notifier). An easy way to"
+    echo "         install this is using HomeBrew (https://brew.sh):"
+    echo
+    echo "             brew install terminal-notifier"
+    echo
+    echo "         If 'terminal-notifier' is not installed then the notification"
+    echo "         feature will not work."
+    echo
+    echo "    3.   The 'sleepwatcher' utility which is used to detect system wake"
+    echo "         and power events (https://www.bernhard-baehr.de). An easy way to"
+    echo "         install this is using HomeBrew (https://brew.sh):"
+    echo
+    echo "             brew install sleepwatcher"
+    echo
+    echo "         You do NOT need to configure 'sleepwatcher' to run automatically."
+    echo
+    echo "         If 'sleepwatcher' is not installed then:"
+    echo
+    echo "         - A less accurate, higher overhead mechanism will be used to detect"
+    echo "           system sleep/wake events and this may result in occasional missed"
+    echo "           events or false positives."
+    echo
+    echo "         - Detection of power source changes is not enabled so the '@battery'"
+    echo "           environment will not trigger any events."
+    echo
+    echo "INSTALLATION"
+    echo
+    echo "1.  Make sure that your PATH setting includes both /usr/local/bin and"
+    echo "    /usr/local/sbin."
+    echo
+    echo "2.  Copy the main script to /usr/local/sbin (recommended) or /usr/local/bin."
+    echo "    The script's default name is 'new' (Network Event Watcher) but you"
+    echo "    can give it any name you like as long as it does not conflict with any"
+    echo "    other executables on your system."
+    echo
+    echo "3.  Create (and test) your customised 'getNwEnv' script (see specification"
+    echo "    below) and put that in /usr/local/bin or /usr/local/sbin."
+    echo
+    echo "4.  Install the 'terminal-notifier' utility. If you do not install this"
+    echo "    utility then the notification feature will not work but everything"
+    echo "    else will still function correctly."
+    echo
+    echo "5.  Install the 'sleepwatcher' utility. If you do not install this"
+    echo "    utility then the '@awake' environment feature will still work but"
+    echo "    it will use a less reliable mechanism to detect system wakes which"
+    echo "    may occasionally result in missed events or false positives."
+    echo
+    echo "CONFIGURATION, STORAGE AND RESTRICTIONS"
+    echo
+    echo "The utility stores its configuration and a few other small files in"
+    echo "'~/Library/Application Support/NwEventWatcher' hence all aspects of"
+    echo "configuration and operation are specific to an individual user."
+    echo "Different users can have different configurations but only one"
+    echo "user's monitor/agent may be running at any one time."
+    echo
+    echo "CONCEPTS"
+    echo
+    echo "Environment"
+    echo
+    echo "    A specific network environment. The list of supported environments"
+    echo "    is that returned by executing 'getNwEnv list'. In addition to the"
+    echo "    environments determined by that command, the following special"
+    echo "    environments are also supported:"
+    echo
+    echo "        Unknown  - Matches any environment not specifically recognised"
+    echo "                   by 'getNwEnv'."
+    echo
+    echo "        @default - Used to set default actions (see below)."
+    echo
+    echo "        @awake   - Used to set an action for system wake events."
+    echo
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "        @battery - System is running on battery power."
+    echo
+    echo "        @all     - Matches all defined environments, including 'Unknown',"
+    echo "                   '@default', '@battery' and @awake."
+    echo
+    else
+    echo "        @all     - Matches all defined environments, including 'Unknown',"
+    echo "                   '@default' and @awake."
+    echo
+    fi
+    echo "Event"
+    echo
+    echo "    An event occurs when a network environment transitions to active (from"
+    echo "    being inactive) or vice versa. The current set of active environments"
+    echo "    is determined by executing the command 'getNwEnv show -all'. Each"
+    echo "    individual environment (including 'Unknown') has its own A (became"
+    echo "    active) and I (became inactive) events. Since multiple environments"
+    echo "    may be active concurrently this means that in any checking cycle"
+    echo "    multiple events may be triggered."
+    echo
+    echo "    The non-network environment '@awake' corresponds to the system"
+    echo "    being awake. Only A events are supported for this environment;"
+    echo "    i.e. the system changed from being asleep to being awake."
+    echo
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "    The non-network environment '@battery' corresponds to the"
+    echo "    system running on battery power (as opposed to AC power)."
+    echo "    The A event for this environment occurs when the system switches"
+    echo "    from AC power to battery and the I event is the reverse of this."
+    echo
+    fi
+    echo "Action"
+    echo
+    echo "    A command associated with an event. When the event is triggered the"
+    echo "    associated action, if any, is executed."
+    echo
+    echo "EVENT DETECTION MECHANISM"
+    echo
+    echo "The monitor task is responsible for detecting and reacting to events"
+    echo "based on the configuration. The monitor can be run directly, either as"
+    echo "a foreground activity, as a background task (preferred) or as a"
+    echo "LaunchAgent (even more preferred). Event detection uses an optimised"
+    echo "algorithm that combines polling with event notification to ensure"
+    echo "timely event detection with minimal system overhead."
+    echo
+    echo "Network change events are normally detected using an agent process that"
+    echo "hooks into the macOS System Configuration Framework. This agent gets"
+    echo "notified by macOS whenever any interesting network environment change"
+    echo "occurs and it in turn notifies the monitor task. This is an efficient"
+    echo "mechanism as it avoids the need to frequently poll for changes to the"
+    echo "network environment. If for some reason the SCF agent cannot function"
+    echo "then the monitor falls back to a polling based mechanism."
+    echo
+    echo "System wake and power events are normally detected using an agent"
+    echo "process that hooks into the macOS Power Notification mechanism."
+    echo "This process is the 'sleepwatcher' utility which must be installed"
+    echo "separately."
+    echo
+    echo "Using 'sleepwatcher' is an efficient mechanism as it avoids the need to"
+    echo "frequently check to see if the system has woken from sleep. It is"
+    echo "also more reliable than the polling based mechanism. If 'sleepwatcher'"
+    echo "is not available, or cannot run, then the monitor falls back to the"
+    echo "polling mechanism."
+    echo
+    echo "When operating in polling mode the monitor regularly checks for changes"
+    echo "to the network environment and for system wake events. The frequency"
+    echo "of these checks is determined by the '-interval' option (see below)."
+    echo "The default interval is ${dfltInterval} seconds and this should be adequate"
+    echo "for most situations."
+    echo
+    echo "RESPONSIVENESS VERSUS RESOURCE USAGE"
+    echo
+    echo "Under typical usage conditions the monitor task and associated helper"
+    echo "tasks use very little CPU (roughly 0.5% of a single core on average)." 
+    echo "There is a tuneable parameter, the sleep quantum, which can be varied to"
+    echo "reduce the (already low) resource usage at the cost of slightly reduced"
+    echo "responsiveness."
+    echo
+    if [[ ${enablePower} -eq 1 ]]
+    then
+    echo "The default sleep quantum is ${dfltAcSleepQuantum} second but this can be increased in 1"
+    echo "second increments, up to a maximum of ${maxSleepQuantum} seconds, by using the '-acsq'"
+    echo "parameter of the 'config' command."
+    echo
+    else
+    echo "The monitor detects when the system transitions between AC power and battery"
+    echo "power and automatically adapts. When running on AC power it uses a sleep"
+    echo "quantum of ${dfltAcSleepQuantum} second for maximum responsiveness with low overhead, and when"
+    echo "running on battery power it increases the sleep quantum to ${dfltBtSleepQuantum} seconds which"
+    echo "significantly reduces CPU usage (and hence increases battery life) for"
+    echo "only a modest reduction in responsiveness. You can tune the values used"
+    echo "in both modes by using the '-acsq' and '-btsq' parameters of the 'config'"
+    echo "command. Values range between ${minSleepQuantum} and ${maxSleepQuantum}."
+    echo
+    fi
+    echo "ACTION EXECUTION AND ORDERING"
+    echo
+    echo "It is possible that multiple events may occur at the same time (or so close"
+    echo "together that they effectively occur at the same time). In such cases there"
+    echo "is a clearly defined order of execution for their associated actions."
+    echo
+    echo "-   First events are triggered for all environments that have transitioned"
+    echo "    from active to inactive (I), then events are triggered for all the"
+    echo "    environments that have transitioned from inactive to active (A)."
+    echo
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "-   Events are triggered in the order in which the environment names"
+    echo "    are returned by the 'getNwEnv list' command. Events for the '@awake'"
+    echo "    environment are always triggered first, followed by events for the"
+    echo "    @battery environment and then events for recognised network"
+    echo "    environments. Events for the 'Unknown' environment are always"
+    echo "    triggered last."
+    echo
+    else
+    echo "-   Events are triggered in the order in which the environment names"
+    echo "    are returned by the 'getNwEnv list' command. Events for the '@awake'"
+    echo "    environment are always triggered before events for recognised network"
+    echo "    environments and events for the 'Unknown' environment are always"
+    echo "    triggered last."
+    echo
+    fi
+    echo "-   If there are no defined actions for an event then the event is ignored; you"
+    echo "    do not need to define actions for every possible event. You can also create"
+    echo "    actions for the special environment named '@default'. These actions will"
+    echo "    then trigger for any event which does not have its own defined actions,"
+    echo "    except for the '@awake' event."
+    echo
+    echo "Actions execute synchronously to the monitor. While an action is executing"
+    echo "the monitor will not detect any new events, but in general new events which" 
+    echo "occur during action execution will be queued and will be detected/processed"
+    echo "after the current set of actions have finished processing."
+    echo
+    echo "ACTION COMMAND EXECUTION ENVIRONMENT"
+    echo
+    echo "Action commands are executed as background tasks. They should make no"
+    echo "assumptions about their environment other than as follows:"
+    echo
+    echo "- PATH will be /usr/local/bin:/usr/local/sbin:/usr/bin/:/usr/sbin:/bin:/sbin"
+    echo
+    echo "- USER will be the username under which the monitor is running"
+    echo
+    echo "- HOME will be the home directory of \$USER"
+    echo
+    echo "Standard input is always redirected to /dev/null. If there is an action"
+    echo "log file defined then standard output and standard error will be redirected"
+    echo "to the log file otherwise they will be redirected to /dev/null. There is"
+    echo "no controlling terminal."
+    echo
+    echo "ACTION COMMANDS"
+    echo
+    echo "When assigning commands to actions, or creating scripts to be used"
+    echo "as action commands, bear in mind the following:"
+    echo
+    echo "-  Action commands run synchronously with the monitor task and so"
+    echo "   should not directly invoke long running operations. Ideally"
+    echo "   an action command should complete its processing within a few"
+    echo "   seconds. If you need to start a long running operation"
+    echo "   from an action command you should ensure that it is started"
+    echo "   as an asynchronous task (for example run it in the background)"
+    echo "   and the action command itself completes quickly."
+    echo
+    echo "-  Action commands can be passed two special parameters which they"
+    echo "   can inspect to determine the event that triggered the action."
+    echo "   See the 'set' command below for details."
+    echo
+    echo "-  Action commands should avoid relying on any specific ordering of"
+    echo "   execution and dependencies on other action commands."
+    echo
+    echo "-  Generally A events are more useful than I events since they are"
+    echo "   more definitive. Nonetheless I events can sometimes be useful."
+    echo
+    echo "USAGE"
+    else
+    echo
+    echo "Usage:"
+    fi
+    echo
+    echo "  ${me} help"
+    echo "  ${me} version"
+    echo "  ${me} list {environments [-verbose] | actions [-script] | active}"
+    echo "  ${me} set environment {a | i | b} [-silent] command [param]..."
+    echo "  ${me} set environment {a | i | b} -notify"
+    echo "  ${me} clear environment {a | i | b} [-verbose]"
+    echo "  ${me} config [-clear | [-warntimeout w] [-killtimeout k]"
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "             [-actionlog path] [-acsq a] [-btsq b]"
+    echo "             [-maxlogs l]]"
+    else
+    echo "             [-actionlog path] [-acsq a] [-maxlogs l]]"
+    fi
+    echo "  ${me} init"
+    echo
+    echo "  ${me} refresh [-force]"
+    echo "  ${me} install [agenturl] [-settle s] [-interval i] [-notify]"
+    echo "  ${me} uninstall"
+    echo "  ${me} status [-verbose]"
+    echo "  ${me} start"
+    echo "  ${me} stop"
+    echo "  ${me} cleanup [-verbose]"
+    echo "  ${me} log [-action] [-follow|-clear|-info|-rotate]"
+    echo
+    echo "  ${me} monitor [-settle s] [-interval i] [-notify] [-fg]"
+    echo
+    if [[ $# -gt 0 ]]
+    then
+    echo "list {environments [-verbose] | actions [-script] | active}"
+    echo
+    echo "    Displays a list of environment names, defined actions or the currently"
+    echo "    active environments (except '@awake'). For actions, if '-script' is"
+    echo "    specified the action list is output as a list of commands that will"
+    echo "    exactly re-create the existing setup."
+    echo
+    echo "    For actions, the 'list' command displays the current state of the on disk"
+    echo "    configuration which may not be the same as the in-memory copy currently"
+    echo "    being used by a running monitor/agent. See 'set', 'clear' and 'refresh'"
+    echo "    below."
+    echo
+    echo "set environment {a | i | b} [-silent] command [param]..."
+    echo
+    echo "    Creates an action; sets a command to be executed when an event is triggered"
+    echo "    for the named environment. Events are:"
+    echo "        -  environment becomes active (a)"
+    echo "        -  environment becomes inactive (i)"
+    echo "        -  either (b)"
+    echo "    Note that 'b' is not a separate event; it is simply a shorthand way of"
+    echo "    creating an action for both 'a' and 'i' events. Only 'a' events may be"
+    echo "    defined for the '@awake' environment."
+    echo
+    echo "    'command' must be an executable file (binary, script, ...) and may be"
+    echo "    followed by optional parameters as required. The following special"
+    echo "    placeholders will be substituted for the corresponding values when the"
+    echo "    command is executed:"
+    echo
+    echo "        #E# - The environment name for the event."
+    echo "        #A# - The new environment state for the event; A = active, I = inactive."
+    echo
+    echo "    An absolute path should always be used when specifying the command."
+    echo
+    echo "    If macOS notifications are enabled then a notification will be sent"
+    echo "    whenever an event with an associated action is triggered occurs unless"
+    echo "    '-silent' was specified when the action was created."
+    echo
+    echo "set environment {a | i | b} -notify"
+    echo
+    echo "    Sets a 'notify only' action for an event. No command is executed but a"
+    echo "    notification is sent if macOS notifications are enabled."
+    echo
+    echo "NOTE:"
+    echo "    If a monitor or agent is running, changes made with the 'set' command will"
+    echo "    not take effect until a 'refresh' command has been issued."
+    echo
+    echo "clear environment {a | i | b} [-verbose]"
+    echo
+    echo "    Removes the specified action(s) for the named environment/event(s)."
+    echo
+    echo "NOTE:"
+    echo "    If a monitor or agent is running, changes made with the 'clear' command will"
+    echo "    not take effect until a 'refresh' command has been issued."
+    echo
+    echo "config [-clear | [-warntimeout w] [-killtimeout k] [-actionlog path]"
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "       [-acsq a] [-btsq b] [-maxlogs l]]"
+    else
+    echo "       [-acsq a]] [-maxlogs l]"
+    fi
+    echo
+    echo "    Sets values for the command execution warning timer (-warntimeout),"
+    echo "    the command execution kill timer (-killtimeout), the action log file"
+    echo "    (-actionlog), the maximum number of retained log files (-maxlogs),"
+    if [[ ${enablePower} -eq 0 ]]
+    then
+    echo "    the AC sleep quantum (-acsq) and the battery sleep quantum (-btsq)"
+    echo "    or clears any values previously set (-clear)."
+    else
+    echo "    and the AC sleep quantum (-acsq) or clears any values previously"
+    echo "    previously set (-clear)."
+    fi
+    echo
+    echo "    Timeout values must be between ${minTimeout} and ${maxTimeout}; a value of 0 for a timeout"
+    echo "    means 'no timeout'. Default values are ${dfltWarnTimeout} for warnings and ${dfltKillTimeout} for the"
+    echo "    kill timeout."
+    echo
+    echo "    If the warning timeout is > 0 and the execution of any action command"
+    echo "    takes longer than the timeout value then a warning message is logged."
+    echo "    If the kill timeout is > 0 and the execution of any action command"
+    echo "    takes longer than the timeout value then the command task is killed and"
+    echo "    an error message is logged."
+    echo
+    echo "    If an action log file is defined then additional information about"
+    echo "    action execution will be logged there and the standard output and"
+    echo "    standard error of action commands will be redirected to the file."
+    echo "    You can disable an existing action log by passing an empty string"
+    echo "    for the path (''); the log file is not deleted."
+    echo
+    echo "    Values for sleep quanta are specified in seconds and must be between"
+    echo "    ${minSleepQuantum} and ${maxSleepQuantum}."
+    echo
+    echo "    The 'maxlogs' value specifies the maximum number of log files to retain"
+    echo "    when using the log file rotation feature. The value must be between ${minNumLogs}"
+    echo "    and ${maxNumLogs}. The default is ${dfltNumLogs}."
+    echo
+    echo "NOTE:"
+    echo "    If a monitor or agent is running, changes made with the 'config' command"
+    echo "    will not take effect until a 'refresh' command has been issued."
+    echo
+    echo "init"
+    echo
+    echo "    Sets up the configuration from scratch; clears all defined timeouts and"
+    echo "    actions and regenerates the list of environments using 'getNwEnv list'."
+    echo "    Any running monitor task or agent must be stopped before using this command."
+    echo "    It is not usually necessary to use this command as an implicit 'init' is"
+    echo "    performed the very first time a user runs this utility."
+    echo
+    echo "refresh [-force]"
+    echo
+    echo "    Tells a running monitor/agent to reload its configuration to pick up any"
+    echo "    pending changes. Normally the refresh is only performed if there are pending"
+    echo "    changes but you can force it to occur by specifying '-force'. Starting the"
+    echo "    monitor/agent using the 'start' or 'monitor' commands performs an implicit"
+    echo "    refresh."
+    echo
+    echo "install [agenturl] [-settle s] [-interval i] [-notify]"
+    echo
+    echo "    Installs a user LaunchAgent so that the monitor runs as an agent whenever"
+    echo "    you are logged in. The agent must not be currently loaded in order to use"
+    echo "    this command. This is the preferred way to use this utility."
+    echo
+    echo "    The options are:"
+    echo
+    echo "      agenturl"
+    echo "          The URL to use for the launch agent."
+    echo "          The default is '${dfltAgentName}'."
+    echo
+    echo "      -settle s"
+    echo "          Wait for 's' seconds before starting to monitor for changes after"
+    echo "          starting or waking from sleep."
+    echo "          ${minSettle} <= s <= ${maxSettle}. The default is ${dfltSettle}."
+    echo
+    echo "      -interval i"
+    echo "          Check for changes every 'i' seconds when using 'polling' mode."
+    echo "          ${minInterval} <= i <= ${maxInterval}. The default is ${dfltInterval}."
+    echo
+    echo "      -notify"
+    echo "          Enables the macOS notification feature. Requires the"
+    echo "          'terminal-notifier' utility."
+    echo
+    echo "uninstall"
+    echo
+    echo "    Uninstalls the user LaunchAgent so that the monitor no longer runs"
+    echo "    automatically. The agent must not be loaded in order to use this"
+    echo "    command."
+    echo
+    echo "status [-verbose]"
+    echo
+    echo "    Displays the status of the monitor/agent. If '-verbose' is specified then"
+    echo "    status is also displayed for sleepwatcher, netwatcher and pending refresh."
+    echo
+    echo "start"
+    echo
+    echo "    Starts the agent if it is configured and not already running."
+    echo
+    echo "stop"
+    echo
+    echo "    Stops the monitor/agent if it is running."
+    echo
+    echo "cleanup"
+    echo
+    echo "    Cleans up any residual helper processes. You should not normally need to"
+    echo "    use this option."
+    echo
+    echo "log [-action] [-follow|-clear|-info|-rotate]"
+    echo
+    echo "    Display, clear (-clear), give information about (-info) or rotate (-rotate)"
+    echo "    the monitor log or the action log (-action), if configured. Using '-follow'"
+    echo "    displays new log entries as they are generated; interrupt the display using"
+    echo "    Ctrl-C."
+    echo
+    echo "    Rotating a log renames the current log as <logname>.1 and so on up to a"
+    echo "    maximum of the configured value for 'maxlogs' set using the 'config' option."
+    echo "    Logs exceeding 'maxlogs' are removed."
+    echo
+    echo "monitor"
+    echo
+    echo "    Runs the monitor directly; useful for special purposes."
+    echo
+    echo "    The options are:"
+    echo
+    echo "      -settle s"
+    echo "          Wait for 's' seconds before starting to monitor for changes after"
+    echo "          starting or waking from sleep."
+    echo "          ${minSettle} <= s <= ${maxSettle}. The default is ${dfltSettle}."
+    echo
+    echo "      -interval i"
+    echo "          Check for changes every 'i' seconds."
+    echo "          ${minInterval} <= i <= ${maxInterval}. The default is ${dfltInterval}."
+    echo
+    echo "      -notify"
+    echo "          Enables the macOS notification feature. Requires the"
+    echo "          'terminal-notifier' utility."
+    echo
+    echo "      -fg"
+    echo "          Normally the monitor process is run as a separate background task."
+    echo "          Specifying '-fg' causes it to be run in the foreground (in the"
+    echo "          invoking task)."
+    echo
+    echo "The GETNWENV SCRIPT"
+    echo
+    echo "Overview"
+    echo
+    echo "The user is responsible for providing a command (most likely a script) called"
+    echo "'getNwEnv' which must be installed in either /usr/local/bin or /usr/local/sbin."
+    echo
+    echo "This script is responsible for:"
+    echo
+    echo "-  Defining the names and descriptions of the set of supported network"
+    echo "   environments."
+    echo
+    echo "-  Determining the set of currently active network environments."
+    echo "   The definition of Active and Inactive is deliberately left to the user"
+    echo "   but typically Active means connected/usable and Inactive means the opposite."
+    echo "   A good example is a VPN connection; when it is not connected it is Inactive"
+    echo "   and when it is connected it becomes Active. The same example holds true for"
+    echo "   WiFi and wired network connections."
+    echo
+    echo "Syntax and specification"
+    echo
+    echo "The syntax for invoking the script is as follows. This is the minimum syntax;"
+    echo "the script may support additional functionality over and above what is specified"
+    echo "here."
+    echo
+    echo "getNwEnv list [-verbose]"
+    echo
+    echo "    Display a list, one per line with no leading or trailing spaces, of all the"
+    echo "    network environments that are supported. An environment name may consist of"
+    echo "    alphanumeric characters and some special characters such as '-_@+-='. Spaces"
+    echo "    are not permitted within an environment name. The following environment"
+    echo "    names are reserved and should NOT be returned by this script; Unknown, @all,"
+    echo "    @awake and @default. Here is an example of what the output might look like:"
+    echo
+    echo "    $ getNwEnv list"
+    echo "    Home-LAN"
+    echo "    Home-WiFi"
+    echo "    Work-LAN"
+    echo "    Work-WiFi"
+    echo "    Work-VPN"
+    echo
+    echo "    The order in which the environments are displayed is significant to the"
+    echo "    network event watcher utility as it affects the order in which events are"
+    echo "    triggered."
+    echo
+    echo "    If the '-verbose' option is specified then each network name should be"
+    echo "    followed by a colon (:) and a textual description of the environment."
+    echo "    For example:"
+    echo
+    echo "    $ getNwEnv list -verbose"
+    echo "    Home-LAN:Wired connection to the home network"
+    echo "    Home-WiFi:WiFi connection to the home network"
+    echo "    Work-LAN:Wired connection to the office network"
+    echo "    Work-WiFi:WiFi connection to the office network"
+    echo "    Work-VPN:VPN connection to work"
+    echo
+    echo "    The order in which the environments are displayed must be the same as"
+    echo "    when the '-verbose' option is not used."
+    echo
+    echo "getNwEnv show -all"
+    echo
+    echo "    Display a list, one per line with no leading or trailing spaces, of the"
+    echo "    currently active network environments. For example if you are currently"
+    echo "    connected to your home WiFi but also using your VPN to access your work"
+    echo "    network then the output would look like this:"
+    echo
+    echo "    $ getNwEnv show -all"
+    echo "    Work-VPN"
+    echo "    Home-WiFi"
+    echo
+    echo "    The order in which the active environments are displayed is not significant."
+    echo
+    echo "Exit codes"
+    echo
+    echo "The 'list' command should always return a zero exit code unless it is unable to"
+    echo "successfully generate the list, in which case the exit code should be > 0."
+    echo
+    echo "The 'show' command should return 0 if at least one of the supported environments"
+    echo "is active. If none of the supported environments is active it should not return"
+    echo "any textual output and the exit code should be 1. An exit code > 1 indicates"
+    echo "that an error occurred and the command was not able to determine the environment"
+    echo "status."
+    echo
+    fi
+    exit 100
+}
+
+canonPath()
+{
+    cwd=`pwd -P`
+    nwd=`dirname "$1"`
+    nfn=`basename "$1"`
+    cd "${nwd}" >&/dev/null
+    if [[ $? -ne 0 ]]
+    then
+        cd "${cwd}" >& /dev/null
+        return 1
+    fi
+    nwd=`pwd -P`
+    if [[ -d "${nfn}" ]]
+    then
+        cd "${nfn}" >&/dev/null
+        if [[ $? -ne 0 ]]
+        then
+            cd "${cwd}"
+            return 1
+        fi
+        nwd=`pwd -P`
+        echo "${nwd}"
+    else
+        echo "${nwd}/${nfn}"
+    fi
+    cd "${cwd}" >& /dev/null
+    return 0
+}
+
+checkHasBattery()
+{
+    pmset -g cap | grep -q acwake
+    if [[ $? -eq 0 ]]
+    then
+        enablePower=0
+    fi
+    return 0
+}
+
+checkActionLog()
+{
+    if [[ "${actlog}" != "" ]]
+    then
+        if checkFileRW "${actlog}" Y
+        then
+            return 0
+        else
+            actlog=""
+        fi
+    fi
+    return 1       
+}
+
+checkSleepwatcher()
+{
+    local sw
+    local -i ret=1
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        sleepwatcher=""
+        useSW=1
+        return ${ret}
+    fi
+
+    sw=`which sleepwatcher 2>/dev/null`
+    if [[ $? -eq 0 ]]
+    then
+        if ${sw} --version 2>/dev/null | grep -q 'Bernhard Baehr'
+        then
+            sleepwatcher="${sw}"
+            useSW=0
+            ret=0
+        else
+            sleepwatcher=""
+            useSW=1
+        fi
+    fi
+
+    return ${ret}
+}
+
+sendNotification()
+{
+    if [[ "${notifier}" == "" ]]
+    then
+        return 0
+    fi
+    ${notifier} -title "Network Event Watcher" -sender "${notifybundle}" -message "$1"
+    return $?
+}
+
+cvtTS()
+{
+    if [[ $# -ne 1 ]]
+    then
+        echo "<invalid>"
+        return 1
+    fi
+    if ! isNumeric "$1"
+    then
+        echo "<invalid>"
+        return 1
+    fi
+    date -j -f '%s' $1 '+%F %H:%M:%S'
+    return 0
+}
+
+logMsg()
+{
+    if [[ "${mylog}" != "" ]]
+    then
+        local ts=`date '+%F %H:%M:%S'`
+        echo "${ts} $@" >> "${mylog}"
+    fi
+    return 0
+}
+
+debugMsg()
+{
+    if [[ ${debug} -eq 0 ]]
+    then
+        logMsg "$@"
+    fi
+    return 0
+}
+
+isNumeric()
+{
+    local n
+
+    if [[ "$1" == "0" ]]
+    then
+        return 0
+    fi
+    n=`expr "$1" + 0 2>/dev/null`
+    if [[ $? -ne 0 ]] || [[ "${n}" != "$1" ]]
+    then
+        return 1
+    else
+        return 0
+    fi
+}
+
+isValidEnvironment()
+{
+    if [[ $# -ne 1 ]] || [[ "$1" == "" ]]
+    then
+        return 2
+    fi
+    grep -q "$1" "${datadir}/${cfgdir}/${envnames}"
+    return $?
+}
+
+netwatcherRunning()
+{
+    local spid
+    local rpid
+    local -i n=0
+    local -i npid
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    while [[ ${n} -lt 10 ]]
+    do
+        if [[ ${intr} -eq 0 ]]
+        then
+            return ${rintr}
+        fi
+        if checkFileR "${datadir}/${tmpdir}/${nwpidfile}"
+        then
+            spid=`cat "${datadir}/${tmpdir}/${nwpidfile}"`
+            if [[ "${spid}" == "" ]]
+            then
+                return 1
+            fi
+            rpid=`ps -f -u ${myuid} | grep "${netwatcher}" | grep -v grep | awk '{ print $2 }'`
+            if [[ "${rpid}" == "" ]]
+            then
+                rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
+                return 1
+            fi
+            npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+            if [[ ${npid} -eq 1 ]]
+            then
+                if [[ "${spid}" != "${rpid}" ]]
+                then
+                    echo "${rpid}" > "${datadir}/${tmpdir}/${nwpidfile}" 2> /dev/null
+                fi
+                echo "${rpid}"
+                return 0
+            fi
+        fi
+        sleep 1
+        n=${n}+1
+    done
+
+    return 1
+}
+
+startNetwatcher()
+{
+    local nwpid
+    local -i tret
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    nwpid=`netwatcherRunning`
+    tret=$?
+    if [[ ${tret} -ne 0 ]]
+    then
+        "${netwatcher}" >/dev/null 2>&1 </dev/null &
+        echo $! > "${datadir}/${tmpdir}/${nwpidfile}" 2>/dev/null
+        nwpid=`netwatcherRunning`
+        tret=$?
+    fi
+    if [[ ${tret} -eq 0 ]]
+    then
+        echo "${nwpid}"
+        return 0
+    fi
+
+    return 1
+}
+
+stopNetwatcher()
+{
+    local nwpid
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    NWpid=0
+    nwpid=`netwatcherRunning`
+    if [[ $? -eq 0 ]]
+    then
+        kill -KILL ${nwpid} >& /dev/null
+        rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
+    fi
+
+    return 0
+}
+
+sleepwatcherRunning()
+{
+    local spid
+    local rpid
+    local -i n=0
+    local -i npid
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+#    if [[ "${sleepwatcher}" == "" ]]
+    if [[ ${useSW} -ne 0 ]]
+    then
+        return 2
+    fi
+
+    while [[ ${n} -lt 10 ]]
+    do
+        if [[ ${intr} -eq 0 ]]
+        then
+            return ${rintr}
+        fi
+        if checkFileR "${datadir}/${tmpdir}/${swpidfile}"
+        then
+            spid=`cat "${datadir}/${tmpdir}/${swpidfile}"`
+            if [[ "${spid}" == "" ]]
+            then
+                return 1
+            fi
+            rpid=`ps -f -u ${myuid} | grep "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup" | grep -v grep | awk '{ print $2 }'`
+            if [[ "${rpid}" == "" ]]
+            then
+                rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
+                return 1
+            fi
+            npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+            if [[ ${npid} -eq 1 ]]
+            then
+                if [[ "${spid}" != "${rpid}" ]]
+                then
+                    echo "${rpid}" > "${datadir}/${tmpdir}/${swpidfile}" 2> /dev/null
+                fi
+                echo "${rpid}"
+                return 0
+            fi
+        fi
+        sleep 1
+        n=${n}+1
+    done
+
+    return 1
+}
+
+startSleepwatcher()
+{
+    local swpid
+    local -i tret
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    if ! checkSleepwatcher
+    then
+        return 2
+    fi
+
+    swpid=`sleepwatcherRunning`
+    tret=$?
+    if [[ ${tret} -ne 0 ]]
+    then
+        if [[ ${enablePower} -eq 0 ]]
+        then
+            "${sleepwatcher}" --pidfile "${datadir}/${tmpdir}/${swpidfile}" --wakeup "'${mypath}' _zzwake" --sleep "'${mypath}' _zzsleep" --plug "'${mypath}' _zzacpower" --unplug "'${mypath}' _zzbattery" >/dev/null 2>&1 </dev/null &
+        else
+            "${sleepwatcher}" --pidfile "${datadir}/${tmpdir}/${swpidfile}" --wakeup "'${mypath}' _zzwake" --sleep "'${mypath}' _zzsleep" >/dev/null 2>&1 </dev/null &
+        fi
+        swpid=`sleepwatcherRunning`
+        tret=$?
+    fi
+    if [[ ${tret} -eq 0 ]]
+    then
+        echo "${swpid}"
+        return 0
+    fi
+
+    return 1
+}
+
+stopSleepwatcher()
+{
+    local swpid
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    SWpid=0
+#    if [[ "${sleepwatcher}" == "" ]]
+    if [[ ${useSW} -ne 0 ]]
+    then
+        return 0
+    fi
+
+    swpid=`sleepwatcherRunning`
+    if [[ $? -eq 0 ]]
+    then
+        kill -KILL ${swpid} >& /dev/null
+        rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
+    fi
+
+    return 0
+}
+
+clearEvent()
+{
+    eventTS=0
+    rm -f "${datadir}/${tmpdir}/${nwchangefile}" >& /dev/null
+    return 0
+}
+
+checkEvent()
+{
+    local -i ts
+    local -i event=1
+
+    if [[ ${forcepoll} -ne 0 ]] && [[ ${inSleep} -ne 0 ]]
+    then
+        if [[ ${eventTS} -gt 0 ]]
+        then
+            event=0
+        elif checkFileR "${datadir}/${tmpdir}/${nwchangefile}"
+        then
+            eventTS=`date '+%s'`
+            event=0
+        fi
+    fi
+
+    return ${event}
+}
+
+checkDeadchild()
+{
+    local -i ret=1
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        return 1
+    fi
+
+    if [[ ${useSW} -eq 0 ]] && [[ ${SWpid} -ne 0 ]]
+    then
+        ps -f -u ${myuid} | grep -v grep | grep -q "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup"
+        if [[ $? -ne 0 ]]
+        then
+            SWpid=0
+            ret=0
+        fi
+    fi
+    if [[ ${NWpid} -ne 0 ]]
+    then
+        ps -f -u ${myuid} | grep -v grep | grep -q "${netwatcher}"
+        if [[ $? -ne 0 ]]
+        then
+            NWpid=0
+            ret=0
+        fi
+    fi
+    return ${ret}
+}
+
+initPower()
+{
+    local -i tret=0
+
+    if [[ ${enablePower} -eq 1 ]]
+    then
+        rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
+        rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
+        return 0
+    fi
+
+    pmset -g ac | grep -q 'No adapter'
+    tret=$?
+    if [[ $# -gt 0 ]]
+    then
+        powerTS=`date '+%s'`
+        rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
+        rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
+        if [[ ${tret} -eq 0 ]]
+        then
+            checkFileRW "${datadir}/${tmpdir}/${batteryfile}" Y
+            curBattery=0
+            prvBattery=1
+        else
+            checkFileRW "${datadir}/${tmpdir}/${acpowerfile}" Y
+            curBattery=1
+            prvBattery=0
+        fi
+    else
+        if [[ ${tret} -eq 1 ]]
+        then
+            checkFileRW "${datadir}/${tmpdir}/${acpowerfile}" Y
+            curBattery=1
+        else
+            checkFileRW "${datadir}/${tmpdir}/${batteryfile}" Y
+            curBattery=0
+        fi
+        if [[ ${curBattery} -ne ${prvBattery} ]]
+        then
+            powerTS=`date '+%s'`
+        fi
+    fi
+#logMsg "DEBUG: initPower: curBattery = ${curBattery}, prvBattery = ${prvBattery}, powerTS = ${powerTS}"
+    return 0
+}
+
+clearPower()
+{
+#logMsg "DEBUG: clearPower: curBattery = ${curBattery}"
+    powerTS=0
+    if [[ ${curBattery} -eq 0 ]]
+    then
+        rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
+    else
+        rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
+    fi
+    return 0
+}
+
+checkPower()
+{
+    local -i pevent=1
+
+    if [[ ${enablePower} -eq 1 ]]
+    then
+        return 1
+    fi
+
+    if [[ ${powerTS} -gt 0 ]]
+    then
+#logMsg "DEBUG: checkPower entry: powerTS = ${powerTS}"
+        pevent=0
+    elif [[ ${useSW} -eq 0 ]] && [[ ${forcepoll} -ne 0 ]] && [[ ${inSleep} -ne 0 ]]
+    then
+        if checkFileR "${datadir}/${tmpdir}/${batteryfile}"
+        then
+#logMsg "DEBUG: checkPower: sw: on battery, curBattery = ${curBattery}"
+            if [[ ${curBattery} -eq 1 ]]
+            then
+                pevent=0
+                curBattery=0
+                powerTS=`date '+%s'`
+                rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
+            fi
+        debugMsg "checkPower: sw: battery ${powerTS}/${curBattery}"
+#logMsg "DEBUG: checkPower: sw: battery ${powerTS}/${curBattery}"
+        fi
+        if checkFileR "${datadir}/${tmpdir}/${acpowerfile}"
+        then
+#logMsg "DEBUG: checkPower: sw: on AC, curBattery = ${curBattery}"
+            if [[ ${curBattery} -eq 0 ]]
+            then
+                pevent=0
+                curBattery=1
+                powerTS=`date '+%s'`
+                rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
+            fi
+#        debugMsg "checkPower: sw: acpower ${powerTS}/${curBattery}"
+#logMsg "DEBUG: checkPower: sw: acpower ${powerTS}/${curBattery}"
+        fi
+    else
+#logMsg "DEBUG: checkPower : ERROR!"
+        pmset -g ac | grep -q 'No adapter'
+        if [[ $? -eq 0 ]]
+        then
+            if [[ ${curBattery} -eq 1 ]]
+            then
+                pevent=0
+                curBattery=0
+                powerTS=`date '+%s'`
+                rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
+#        debugMsg "checkPower: poll: battery ${powerTS}/${curBattery}"
+            fi
+        else
+            if [[ ${curBattery} -eq 0 ]]
+            then
+                pevent=0
+                curBattery=1
+                powerTS=`date '+%s'`
+                rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
+#        debugMsg "checkPower: poll: acpower ${powerTS}/${curBattery}"
+            fi
+        fi
+    fi
+
+    if [[ ${curBattery} -eq 0 ]]
+    then
+        sleepQuantum=${btSQ}
+    else
+        sleepQuantum=${acSQ}
+    fi
+
+#logMsg "DEBUG: checkPower: pevent = ${pevent}"
+    return ${pevent}
+}
+
+clearWake()
+{
+    slpTS=`date '+%s'`
+    wakeTS=0
+    rm -f "${datadir}/${tmpdir}/${sleepfile}" >& /dev/null
+    rm -f "${datadir}/${tmpdir}/${wakefile}" >& /dev/null
+    return 0
+}
+
+checkWakeOld()
+{
+    local -i ts
+    local -i delta
+    local -i wake=1
+
+    if [[ ${wakeTS} -gt 0 ]] 
+    then
+        wake=0
+    elif [[ ${useSW} -eq 0 ]] && [[ ${forcepoll} -ne 0 ]]
+    then
+        if checkFileR "${datadir}/${tmpdir}/${sleepfile}"
+        then
+            wake=1
+            inSleep=0
+            slpTS=`cat "${datadir}/${tmpdir}/${sleepfile}"`
+#        debugMsg "checkWake: sw: sleep ${slpTS}"
+        fi
+        if checkFileR "${datadir}/${tmpdir}/${wakefile}"
+        then
+            wake=0
+            inSleep=1
+            wakeTS=`cat "${datadir}/${tmpdir}/${wakefile}"`
+#        debugMsg "checkWake: sw: wake ${slpTS} / ${wakeTS}"
+        fi
+    else
+        ts=`date '+%s'`
+        delta=${ts}-${slpTS}
+#        debugMsg "checkWake: poll: slpTS = ${slpTS}, ts = ${ts}, delta = ${delta}"
+        if [[ ${delta} -gt ${wakeCheckValue} ]]
+        then
+#        debugMsg "checkWake: poll: WAKE"
+            wake=0
+            wakeTS=${ts}
+        else
+            slpTS=${ts}
+        fi
+    fi
+
+    return ${wake}
+}
+
+checkWake()
+{
+    local -i ts
+    local -i delta
+    local -i wake=1
+    local -i sTS=0
+    local -i wTS=0
+
+    if [[ ${useSW} -eq 0 ]] && [[ ${forcepoll} -ne 0 ]]
+    then
+#       event driven mode
+        if checkFileR "${datadir}/${tmpdir}/${sleepfile}"
+        then
+            sTS=`cat "${datadir}/${tmpdir}/${sleepfile}"`
+        fi
+        if checkFileR "${datadir}/${tmpdir}/${wakefile}"
+        then
+            wTS=`cat "${datadir}/${tmpdir}/${wakefile}"`
+        fi
+        if [[ ${sTS} -gt ${wTS} ]]
+        then
+#           system is supposedly going to sleep
+            wake=1
+            inSleep=0
+            slpTS=${sTS}
+            wakeTS=0
+        elif [[ ${wTS} -gt ${sTS} ]]
+        then
+#           system has supposedly woken from sleep
+            delta=${wTS}-${sTS}
+            if [[ ${delta} -lt ${minsleepsecs} ]]
+            then
+                logMsg "bogus sleep/wake ${sTS}/${wTS} - ignoring"
+            else
+                wake=0
+                inSleep=1
+                wakeTS=${wTS}
+            fi
+        elif [[ ${wakeTS} -gt 0 ]]
+        then
+#           pending unhandled wake
+            wake=0
+        fi
+    else
+#       poll mode
+        if [[ ${wakeTS} -gt 0 ]]
+        then
+#           pending unhandled wake
+            wake=0
+        else
+            ts=`date '+%s'`
+            delta=${ts}-${slpTS}
+            if [[ ${delta} -gt ${wakeCheckValue} ]]
+            then
+                wake=0
+                wakeTS=${ts}
+            else
+                slpTS=${ts}
+            fi
+        fi
+    fi
+
+    return ${wake}
+}
+
+setinterrupt()
+{
+    intr=0
+#    debugMsg "INTERRUPT received"
+    return 0
+}
+
+setrefresh()
+{
+    refresh=0
+#    debugMsg "REFRESH received"
+    return 0
+}
+
+cleanup()
+{
+    if [[ "${mypid}" != "" ]]
+    then
+        rm -f "${mypid}" >& /dev/null
+        mypid=""
+    fi
+    if [[ "${mytmp}" != "" ]]
+    then
+        rm -rf "${mytmp}" >& /dev/null
+        mytmp=""
+    fi
+    exit $1
+}
+
+checkFileR()
+{
+    local f="$1"
+    local -i create=1
+
+    if [[ $# -gt 1 ]]
+    then
+        create=0
+    fi
+
+    if [[ -e "${f}" ]]
+    then
+        if [[ ! -f "${f}" ]]
+        then
+            return 2
+        elif [[ ! -r "${f}" ]]
+        then
+            if ! chmod u+r "${f}" >& /dev/null
+            then
+                return 3
+            fi
+        fi
+    else
+        if [[ ${create} -eq 1 ]]
+        then
+            return 1
+        else
+            if ! touch "${f}" >& /dev/null
+            then
+                return 4
+            fi
+            if ! chmod u+r "${f}" >& /dev/null
+            then
+                return 5
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+checkFileRW()
+{
+    local f="$1"
+    local -i create=1
+
+    if [[ $# -gt 1 ]]
+    then
+        create=0
+    fi
+
+    if [[ -e "${f}" ]]
+    then
+        if [[ ! -f "${f}" ]]
+        then
+            return 2
+        elif [[ ! -r "${f}" ]] || [[ ! -w "${f}" ]]
+        then
+            if ! chmod u+rw "${f}" >& /dev/null
+            then
+                return 2
+            fi
+        fi
+    else
+        if [[ ${create} -eq 1 ]]
+        then
+            return 1
+        else
+            if ! touch "${f}" >& /dev/null
+            then
+                return 4
+            fi
+            if ! chmod u+rw "${f}" >& /dev/null
+            then
+                return 5
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+checkFileRX()
+{
+    local f="$1"
+    local -i create=1
+
+    if [[ $# -gt 1 ]]
+    then
+        create=0
+    fi
+
+    if [[ -e "${f}" ]]
+    then
+        if [[ ! -f "${f}" ]]
+        then
+            return 2
+        elif [[ ! -r "${f}" ]] || [[ ! -x "${f}" ]]
+        then
+            if ! chmod u+rx "${f}" >& /dev/null
+            then
+                return 3
+            fi
+        fi
+    else
+        if [[ ${create} -eq 1 ]]
+        then
+            return 1
+        else
+            if ! touch "${f}" >& /dev/null
+            then
+                return 4
+            fi
+            if ! chmod u+rx "${f}" >& /dev/null
+            then
+                return 5
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+checkFileRWX()
+{
+    local f="$1"
+    local -i create=1
+
+    if [[ $# -gt 1 ]]
+    then
+        create=0
+    fi
+
+    if [[ -e "${f}" ]]
+    then
+        if [[ ! -f "${f}" ]]
+        then
+            return 2
+        elif [[ ! -r "${f}" ]] || [[ ! -w "${f}" ]] || [[ ! -x "${f}" ]]
+        then
+            if ! chmod u+rwx "${f}" >& /dev/null
+            then
+                return 3
+            fi
+        fi
+    else
+        if [[ ${create} -eq 1 ]]
+        then
+            return 1
+        else
+            if ! touch "${f}" >& /dev/null
+            then
+                return 4
+            fi
+            if ! chmod u+rwx "${f}" >& /dev/null
+            then
+                return 5
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+checkDir()
+{
+    local d="$1"
+    local -i create=1
+
+    if [[ $# -gt 1 ]]
+    then
+        create=0
+    fi
+
+    if [[ -e "${d}" ]]
+    then
+        if [[ ! -d "${d}" ]]
+        then
+            return 2
+        elif [[ ! -r "${d}" ]] || [[ ! -w "${d}" ]] || [[ ! -x "${d}" ]]
+        then
+            if ! chmod u+rwx "${d}" >& /dev/null
+            then
+                return 3
+            fi
+        fi
+    else
+        if [[ ${create} -eq 1 ]]
+        then
+            return 1
+        else
+            if ! mkdir "${d}" >& /dev/null
+            then
+                return 4
+            fi
+            if ! chmod u+rwx "${d}" >& /dev/null
+            then
+                return 5
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+isAgent()
+{
+    if checkFileRW "${datadir}/${cfgdir}/${lanamef}"
+    then
+        return 0
+    else
+        return 1
+    fi
+}
+
+loadConfig()
+{
+    local tmp
+    local -i interactive=1
+    local -i ret=0
+
+    if [[ $# -gt 0 ]]
+    then
+        interactive=0
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${killtimeout}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${killtimeout}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${killtimeout}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        cmdkilltimeout=${dfltKillTimeout}
+    else
+        cmdkilltimeout=`cat "${datadir}/${cfgdir}/${killtimeout}"`
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${warntimeout}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${warntimeout}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${warntimeout}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        cmdwarntimeout=${dfltWarnTimeout}
+    else
+        cmdwarntimeout=`cat "${datadir}/${cfgdir}/${warntimeout}"`
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${acsqfile}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${acsqfile}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${acsqfile}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        acSQ=${dfltAcSleepQuantum}
+    else
+        acSQ=`cat "${datadir}/${cfgdir}/${acsqfile}"`
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${btsqfile}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${btsqfile}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${btsqfile}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        btSQ=${dfltBtSleepQuantum}
+    else
+        btSQ=`cat "${datadir}/${cfgdir}/${btsqfile}"`
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${numlogfile}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${numlogfile}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${numlogfile}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        maxlogs=${dfltNumLogs}
+    else
+        maxlogs=`cat "${datadir}/${cfgdir}/${numlogfile}"`
+    fi
+
+    checkFileR "${datadir}/${cfgdir}/${actionlog}"
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        if [[ ${interactive} -eq 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${cfgdir}/${actionlog}'"
+        else
+            logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${actionlog}'"
+        fi
+        return 2
+    elif [[ ${ret} -eq 1 ]]
+    then
+        actlog=""
+    else
+        actlog=`cat "${datadir}/${cfgdir}/${actionlog}"`
+        tmp="${actlog}"
+        if ! checkActionLog
+        then
+            if [[ ${interactive} -eq 1 ]]
+            then
+                logMsg "WARNING: action log '${tmp}' not accessible, action logging disabled"
+            fi
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+monRefresh()
+{
+    local -i tret
+    local first="$1"
+    local nwenv
+    local act
+    local swpid
+    local tmp
+
+#    debugMsg "REFRESH START"
+
+    loadConfig
+    if [[ $? -gt 1 ]]
+    then
+        return 1
+    fi
+
+    if ! checkFileR "${datadir}/${cfgdir}/${envnames}"
+    then
+        logMsg "ERROR: unable to access '${datadir}/${cfgdir}/${envnames}'"
+        return 2
+    fi
+
+    dfltA=""
+    dfltI=""
+    dfltAN=1
+    dfltIN=1
+    checkDir "${datadir}/${actdir}/${envDefault}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        logMsg "ERROR: unable to access '${datadir}/${actdir}/${envDefault}'"
+        return 3
+    elif [[ ${tret} -eq 0 ]]
+    then
+        for act in a i
+        do
+            checkFileR "${datadir}/${actdir}/${envDefault}/${act}/${cmdfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envDefault}/${act}/${cmdfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    dfltA=`cat "${datadir}/${actdir}/${envDefault}/${act}/${cmdfile}"`
+                else
+                    dfltI=`cat "${datadir}/${actdir}/${envDefault}/${act}/${cmdfile}"`
+                fi
+            fi
+            checkFileR "${datadir}/${actdir}/${envDefault}/${act}/${notifyfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envDefault}/${act}/${notifyfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    dfltAN=0
+                else
+                    dfltIN=0
+                fi
+            fi
+        done
+    fi
+
+#    debugMsg "${envDefault}:${dfltA}:${dfltAN}:${dfltI}:${dfltIN}"
+
+    wakeA=""
+    wakeI=""
+    wakeAN=1
+    wakeIN=1
+    checkDir "${datadir}/${actdir}/${envWake}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        logMsg "ERROR: unable to access '${datadir}/${actdir}/${envWake}'"
+        return 3
+    elif [[ ${tret} -eq 0 ]]
+    then
+        for act in a
+        do
+            checkFileR "${datadir}/${actdir}/${envWake}/${act}/${cmdfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envWake}/${act}/${cmdfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    wakeA=`cat "${datadir}/${actdir}/${envWake}/${act}/${cmdfile}"`
+                else
+                    wakeI=`cat "${datadir}/${actdir}/${envWake}/${act}/${cmdfile}"`
+                fi
+            fi
+            checkFileR "${datadir}/${actdir}/${envWake}/${act}/${notifyfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envWake}/${act}/${notifyfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    wakeAN=0
+                else
+                    wakeIN=0
+                fi
+            fi
+        done
+    fi
+
+#    debugMsg "${envWake}:${wakeA}:${wakeAN}:${wakeI}:${wakeIN}"
+
+    powerA=""
+    powerI=""
+    powerAN=1
+    powerIN=1
+    checkDir "${datadir}/${actdir}/${envBattery}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        logMsg "ERROR: unable to access '${datadir}/${actdir}/${envBattery}'"
+        return 3
+    elif [[ ${tret} -eq 0 ]]
+    then
+        for act in a i
+        do
+            checkFileR "${datadir}/${actdir}/${envBattery}/${act}/${cmdfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envBattery}/${act}/${cmdfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    powerA=`cat "${datadir}/${actdir}/${envBattery}/${act}/${cmdfile}"`
+                else
+                    powerI=`cat "${datadir}/${actdir}/${envBattery}/${act}/${cmdfile}"`
+                fi
+            fi
+            checkFileR "${datadir}/${actdir}/${envBattery}/${act}/${notifyfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                logMsg "ERROR: unable to access '${datadir}/${actdir}/${envBattery}/${act}/${notifyfile}'"
+                return 4
+            elif [[ ${tret} -eq 0 ]]
+            then
+                if [[ "${act}" == "a" ]]
+                then
+                    powerAN=0
+                else
+                    powerIN=0
+                fi
+            fi
+        done
+    fi
+
+#    debugMsg "${envBattery}:${powerA}:${powerAN}:${powerI}:${powerIN}"
+
+    nEnv=0
+    while read nwenv tmp
+    do
+        if [[ ${intr} -eq 0 ]]
+        then
+            return ${rintr}
+        fi
+
+        if [[ "${nwenv}" == "" ]] || [[ "${tmp}" != "" ]]
+        then
+            logMsg "ERROR: invalid data in '${datadir}/${cfgdir}/${envnames}'"
+            return 5
+        fi
+        curEnv[${nEnv}]="${nwenv}"
+        curA[${nEnv}]=""
+        curI[${nEnv}]=""
+        curAN[${nEnv}]=1
+        curIN[${nEnv}]=1
+        
+        checkDir "${datadir}/${actdir}/${nwenv}"
+        tret=$?
+        if [[ ${tret} -gt 1 ]]
+        then
+            logMsg "ERROR: unable to access '${datadir}/${actdir}/${nwenv}'"
+            return 6
+        elif [[ ${tret} -eq 0 ]]
+        then
+            for act in a i
+            do
+                checkFileR "${datadir}/${actdir}/${nwenv}/${act}/${cmdfile}"
+                tret=$?
+                if [[ ${tret} -gt 1 ]]
+                then
+                    logMsg "ERROR: unable to access '${datadir}/${actdir}/${nwenv}/${act}/${cmdfile}'"
+                    return 7
+                elif [[ ${tret} -eq 0 ]]
+                then
+                    if [[ "${act}" == "a" ]]
+                    then
+                        curA[${nEnv}]=`cat "${datadir}/${actdir}/${nwenv}/${act}/${cmdfile}"`
+                    else
+                        curI[${nEnv}]=`cat "${datadir}/${actdir}/${nwenv}/${act}/${cmdfile}"`
+                    fi
+                fi
+                checkFileR "${datadir}/${actdir}/${nwenv}/${act}/${notifyfile}"
+                tret=$?
+                if [[ ${tret} -gt 1 ]]
+                then
+                    logMsg "ERROR: unable to access '${datadir}/${actdir}/${nwenv}/${act}/${notifyfile}'"
+                    return 7
+                elif [[ ${tret} -eq 0 ]]
+                then
+                    if [[ "${act}" == "a" ]]
+                    then
+                        curAN[${nEnv}]=0
+                    else
+                        curIN[${nEnv}]=0
+                    fi
+                fi
+            done
+        fi
+
+#        debugMsg "${nEnv}:${curEnv[${nEnv}]}:${curA[${nEnv}]}:${curAN[${nEnv}]}:${curI[${nEnv}]}:${curIN[${nEnv}]}"
+
+        if [[ "${first}" != "" ]]
+        then
+            curAct[${nEnv}]=1
+            prvAct[${nEnv}]=1
+        fi
+
+        nEnv=${nEnv}+1
+    done < "${datadir}/${cfgdir}/${envnames}"
+    
+    rm -f "${datadir}/${tmpdir}/${reffile}" >& /dev/null
+
+#    debugMsg "REFRESH END"
+
+    return 0
+}
+
+monSleep()
+{
+    local -i start=0
+    local -i now=0
+    local -i elapsed=0
+    local -i residue=$1
+    local -i stime=$1
+    local -i ievent=$2
+    local -i irefresh=$3
+    local -i icdeath=$4
+    local -i ipower=$5
+    
+    if [[ ${stime} -gt 0 ]]
+    then
+        start=`date '+%s'`
+        while [[ ${elapsed} -lt ${stime} ]]
+        do
+            if [[ ${residue} -lt 1 ]]
+            then
+                logMsg "TEMPORAL ANOMALY: stime = ${stime}, sq = ${sleepQuantum}, start = ${start}, now = ${now}, elapsed = ${elapsed}, residue = ${residue}"
+            fi
+            if [[ ${residue} -lt ${sleepQuantum} ]]
+            then
+                sleep ${residue}
+            else
+                sleep ${sleepQuantum}
+            fi
+            if [[ ${intr} -eq 0 ]]
+            then
+                return ${rintr}
+            fi
+            if checkWake
+            then
+                return 0
+            fi
+            if [[ ${ievent} -eq 0 ]]
+            then
+                if checkEvent
+                then
+                    return 0
+                fi
+            fi
+            if [[ ${enablePower} -eq 0 ]] && [[ ${ipower} -eq 0 ]]
+            then
+                if checkPower
+                then
+                    return 0
+                fi
+            fi
+            if [[ ${irefresh} -eq 0 ]] && [[ ${refresh} -eq 0 ]]
+            then
+                return 0
+            fi
+            if [[ ${cdeath} -eq 0 ]]
+            then
+                if checkDeadchild
+                then
+                    return 0
+                fi
+            fi
+            now=`date '+%s'`
+            elapsed=${now}-${start}
+            residue=${stime}-${elapsed}
+        done
+    fi
+
+    return 0
+}
+
+monGetActive()
+{
+    local -i tret=0
+    local -i i=0
+    local nwenv
+
+    if ! checkFileRW "${datadir}/${tmpdir}/${envfile}" Y
+    then
+        logMsg "ERROR: unable to access '${datadir}/${tmpdir}/${envfile}'"
+        return 1
+    fi
+
+    if [[ ${intr} -eq 0 ]]
+    then
+        return ${rintr}
+    fi
+
+    getNwEnv show -all > "${datadir}/${tmpdir}/${envfile}" 2> /dev/null
+    tret=$?
+    if [[ ${tret} -eq 1 ]]
+    then
+        echo "${unknownname}" > "${datadir}/${tmpdir}/${envfile}" 2> /dev/null
+        tret=0
+    elif [[ ${tret} -gt 1 ]]
+    then
+        logMsg "ERROR: 'getNwEnv' returned an error"
+        return 2
+    fi
+
+    if [[ ${intr} -eq 0 ]]
+    then
+        return ${rintr}
+    fi
+
+    while [[ ${i} -lt ${nEnv} ]]
+    do
+        curAct[${i}]=1
+        i=${i}+1
+    done
+    if [[ ${tret} -eq 0 ]]
+    then
+        while read nwenv
+        do
+            i=0
+            while [[ ${i} -lt ${nEnv} ]]
+            do
+                if [[ "${nwenv}" == "${curEnv[${i}]}" ]]
+                then
+#                    debugMsg "ACTIVE - ${nwenv}"
+                    curAct[${i}]=0
+                    i=${nEnv}
+                else
+                    i=${i}+1
+                fi
+                if [[ ${intr} -eq 0 ]]
+                then
+                    return ${rintr}
+                fi
+            done
+        done < "${datadir}/${tmpdir}/${envfile}"
+    fi
+
+    return 0
+}
+
+killPID()
+{
+    local -i pid
+    local -i n=0
+
+    if [[ $# -ne 1 ]]
+    then
+        return 1
+    fi
+    if ! isNumeric "$1"
+    then
+        return 1
+    fi
+    pid=$1
+
+    kill -TERM ${pid}
+    while kill -0 ${pid}
+    do
+        if [[ ${n} -gt 5 ]]
+        then
+            kill -9 ${pid}
+            return 0
+        elif ! monSleep 1 1 1 1 1 1
+        then
+            return ${rintr}
+        fi
+        n=${n}+1
+    done
+
+    return 0
+}
+
+monExec()
+{
+    local envnm="$1"
+    local act="$2"
+    local cmd="$3"
+    local res
+    local ts
+    local -i n=0
+    local -i ret
+    local -i cpid
+    local -i killed=1
+
+    cmd=`echo "${cmd}" | sed -e "s/${subenv}/${envnm}/g" -e "s/${subact}/${act}/g"`
+    logMsg "action ${envnm}:${act}:${cmd}"
+    ts=`date '+%F %H:%M:%S'`
+    if checkActionLog
+    then
+        echo "----------------------------------------" >> "${actlog}" 2>/dev/null
+        echo "${ts} initiated ${envnm}:${act}:${cmd}" >> "${actlog}" 2>/dev/null
+        ${cmd} >> "${actlog}" 2>&1 </dev/null &
+    else
+        ${cmd} >&/dev/null </dev/null &
+    fi
+    ret=$?
+    cpid=$!
+    if [[ ${ret} -ne 0 ]]
+    then
+        logMsg "result ${ret}"
+        if checkActionLog
+        then
+            echo "${ts} initiation failed ${envnm}:${act}:${cmd} (${ret})" >> "${actlog}" 2>/dev/null
+        fi
+        return 0
+    fi
+    while kill -0 ${cpid} >& /dev/null
+    do
+        if ! monSleep 1 1 1 1 1
+        then
+            killPID ${cpid}
+            return ${rintr}
+        fi
+        n=${n}+1
+        if [[ ${cmdkilltimeout} -gt 0 ]] && [[ ${n} -gt ${cmdkilltimeout} ]]
+        then
+            killPID ${cpid}
+            killed=0
+            logMsg "ERROR: command execution exceeded ${cmdkilltimeout} seconds - KILLED"
+            if checkActionLog
+            then
+                echo "${ts} KILLED ${envnm}:${act}:${cmd} (execution exceeded timeout)" >> "${actlog}" 2>/dev/null
+            fi
+        fi
+    done
+    wait ${cpid}
+    ret=$?
+    logMsg "result ${ret}, execution took ${n} seconds"
+    ts=`date '+%F %H:%M:%S'`
+    if checkActionLog
+    then
+        echo "${ts} execution complete ${envnm}:${act}:${cmd} (${ret})" >> "${actlog}" 2>/dev/null
+    fi
+    if [[ ${cmdwarntimeout} -gt 0 ]] && \
+       [[ ${n} -gt ${cmdwarntimeout} ]] && \
+       [[ ${killed} -eq 1 ]]
+    then
+        logMsg "WARNING: command execution exceeded ${cmdwarntimeout} seconds"
+        if checkActionLog
+        then
+            echo "${ts} WARNING: command execution exceeded ${cmdwarntimeout} seconds" >> "${actlog}" 2>/dev/null
+        fi
+    fi
+
+    return 0
+}
+
+monDoPower()
+{
+    local -i notify=$1
+    local -i nf=1
+    local envnm
+    local act
+    local msg
+    local cmd
+
+#logMsg "DEBUG: monDoPower entry: curBattery = ${curBattery}"
+    if [[ ${enablePower} -eq 1 ]]
+    then
+        return 0
+    fi
+
+    envnm="${envBattery}"
+    if [ ${curBattery} -eq 0 ]
+    then
+        msg="${envnm} became Active"
+        act=A
+        logMsg "${msg}"
+        if [[ ${powerAN} -eq 0 ]]
+        then
+            nf=0
+        fi
+        if [[ "${powerA}" != "" ]]
+        then
+            cmd="${powerA}"
+            nf=${powerAN}
+        fi
+        if [[ "${cmd}" == "" ]] && [[ ${nf} -eq 1 ]]
+        then
+            cmd="${dfltA}"
+            nf=${dfltAN}
+        fi
+        if [[ ${nf} -eq 0 ]] && [[ ${notify} -eq 0 ]]
+        then
+            sendNotification "${msg}"
+        fi
+        if [[ "${cmd}" != "" ]]
+        then
+            monExec "${envnm}" "${act}" "${cmd}"
+        fi
+    else
+        msg="${envnm} became Inactive"
+        act=I
+        logMsg "${msg}"
+        if [[ ${powerIN} -eq 0 ]]
+        then
+            nf=0
+        fi
+        if [[ "${powerI}" != "" ]]
+        then
+            cmd="${powerI}"
+            nf=${powerIN}
+        fi
+        if [[ "${cmd}" == "" ]] && [[ ${nf} -eq 1 ]]
+        then
+            cmd="${dfltI}"
+            nf=${dfltIN}
+        fi
+        if [[ ${nf} -eq 0 ]] && [[ ${notify} -eq 0 ]]
+        then
+            sendNotification "${msg}"
+        fi
+        if [[ "${cmd}" != "" ]]
+        then
+            monExec "${envnm}" "${act}" "${cmd}"
+        fi
+    fi
+    logMsg "sleep quantum is now ${sleepQuantum}"
+    if [[ ${intr} -eq 0 ]]
+    then
+        return ${rintr}
+    fi
+
+    return 0
+}
+
+monDoWake()
+{
+    local -i notify=$1
+    local -i nf=1
+    local envnm
+    local act
+    local msg
+    local cmd
+
+    envnm="${envWake}"
+    msg="${envnm} became Active"
+    act=A
+    logMsg "${msg}"
+    if [[ ${wakeAN} -eq 0 ]]
+    then
+        nf=0
+    fi
+    if [[ "${wakeA}" != "" ]]
+    then
+        cmd="${wakeA}"
+        nf=${wakeAN}
+    fi
+    if [[ "${cmd}" == "" ]] && [[ ${nf} -eq 1 ]]
+    then
+        cmd="${dfltA}"
+        nf=${dfltAN}
+    fi
+    if [[ ${nf} -eq 0 ]] && [[ ${notify} -eq 0 ]]
+    then
+        sendNotification "${msg}"
+    fi
+    if [[ "${cmd}" != "" ]]
+    then
+        monExec "${envnm}" "${act}" "${cmd}"
+    fi
+    if [[ ${intr} -eq 0 ]]
+    then
+        return ${rintr}
+    fi
+
+    return 0
+}
+
+monDoActions()
+{
+    local -i i=0
+    local -i tmp
+    local -i notify=$1
+    local envnm
+    local act
+    local -i nf=1
+    local cmd
+    local msg
+
+    i=0
+    while [[ ${i} -lt ${nEnv} ]]
+    do
+        cmd=""
+        nf=1
+        tmp=${curAct[${i}]}
+        if [[ ${prvAct[i]} -ne ${tmp} ]]
+        then
+            envnm="${curEnv[${i}]}"
+            if [[ ${tmp} -eq 1 ]]
+            then
+                msg="${envnm} became Inactive"
+                act=I
+                logMsg "${msg}"
+                if [[ ${curIN[${i}]} -eq 0 ]]
+                then
+                    nf=0
+                fi
+                if [[ "${curI[${i}]}" != "" ]]
+                then
+                    cmd="${curI[${i}]}"
+                    nf=${curIN[${i}]}
+                fi
+                if [[ "${cmd}" == "" ]] && [[ ${nf} -eq 1 ]]
+                then
+                    cmd="${dfltI}"
+                    nf=${dfltIN}
+                fi
+            fi
+            if [[ ${nf} -eq 0 ]] && [[ ${notify} -eq 0 ]]
+            then
+                sendNotification "${msg}"
+            fi
+            if [[ "${cmd}" != "" ]]
+            then
+                monExec "${envnm}" "${act}" "${cmd}"
+            fi
+        fi
+        if [[ ${intr} -eq 0 ]]
+        then
+            return ${rintr}
+        fi
+        i=${i}+1
+    done
+
+    i=0
+    while [[ ${i} -lt ${nEnv} ]]
+    do
+        cmd=""
+        nf=1
+        tmp=${curAct[${i}]}
+        if [[ ${prvAct[i]} -ne ${tmp} ]]
+        then
+            envnm="${curEnv[${i}]}"
+            if [[ ${tmp} -eq 0 ]]
+            then
+                msg="${envnm} became Active"
+                act=A
+                logMsg "${msg}"
+                if [[ ${curAN[${i}]} -eq 0 ]]
+                then
+                    nf=0
+                fi
+                if [[ "${curA[${i}]}" != "" ]]
+                then
+                    cmd="${curA[${i}]}"
+                    nf=${curAN[${i}]}
+                fi
+                if [[ "${cmd}" == "" ]] && [[ ${nf} -eq 1 ]]
+                then
+                    cmd="${dfltA}"
+                    nf=${dfltAN}
+                fi
+            fi
+            if [[ ${nf} -eq 0 ]] && [[ ${notify} -eq 0 ]]
+            then
+                sendNotification "${msg}"
+            fi
+            if [[ "${cmd}" != "" ]]
+            then
+                monExec "${envnm}" "${act}" "${cmd}"
+            fi
+        fi
+        if [[ ${intr} -eq 0 ]]
+        then
+            return ${rintr}
+        fi
+        i=${i}+1
+    done
+
+    return 0
+}
+
+createNetwatcher()
+{
+    netwatcher="${datadir}/${bindir}/${nwname}"
+    if ! checkFileRWX "${netwatcher}" Y
+    then
+        return 2
+    fi
+
+    cat - > "${netwatcher}" 2>/dev/null <<!!!
+#!/usr/bin/python
+
+import os
+import signal
+import sys
+from Foundation import *
+from SystemConfiguration import *
+
+fpath = "${datadir}/${tmpdir}/${nwchangefile}"
+
+def touch(path):
+    basedir = os.path.dirname(path)
+    if not os.path.exists(basedir):
+        os.makedirs(basedir)
+    open(path, 'w').close()
+
+def callback(store, keys, info):
+  touch(fpath)
+
+store = SCDynamicStoreCreate(None,
+                             "global-network-watcher",
+                             callback,
+                             None)
+SCDynamicStoreSetNotificationKeys(store,
+                                  None,
+                                  ['State:/Network/Interface/.*/IPv.'])
+CFRunLoopAddSource(CFRunLoopGetCurrent(),
+                   SCDynamicStoreCreateRunLoopSource(None, store, 0),
+                   kCFRunLoopCommonModes)
+CFRunLoopRun()
+
+!!!
+
+    if [[ $? -ne 0 ]]
+    then
+        return 1
+    fi
+    if ! chmod 755 "${netwatcher}" >& /dev/null
+    then
+        return 1
+    fi
+    
+    return 0
+}
+
+init()
+{
+    local -i t1
+    local -i t2
+    local tmp
+
+    if ! which getNwEnv >&/dev/null
+    then
+        echo >&2 "error: the 'getNwEnv' utility is not in your PATH"
+        exit 99
+    fi
+    if which terminal-notifier >&/dev/null
+    then
+        notifier="terminal-notifier"
+    fi
+    if [[ ${forcepoll} -ne 0 ]]
+    then
+        checkSleepwatcher
+    fi
+
+    if ! checkDir "${datadir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}'"
+        exit 97
+    fi
+    if ! checkDir "${datadir}/${bindir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}/${bindir}'"
+        exit 96
+    fi
+    if ! checkDir "${datadir}/${cfgdir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}/${cfgdir}'"
+        exit 95
+    fi
+    if ! checkDir "${datadir}/${actdir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}/${actdir}'"
+        exit 94
+    fi
+    if ! checkDir "${datadir}/${tmpdir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}/${tmpdir}'"
+        exit 93
+    fi
+    if ! checkDir "${datadir}/${logdir}" Y
+    then
+        echo >&2 "error: init failed for '${datadir}/${logdir}'"
+        exit 92
+    fi
+
+    if ! createNetwatcher
+    then
+        echo >&2 "error: failed to create 'netwatcher'"
+        exit 91
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${envnames}"
+    t1=$?
+    checkFileRW "${datadir}/${cfgdir}/${envdescs}"
+    t2=$?
+    if [[ ${t1} -gt 1 ]] || [[ ${t2} -gt 1 ]]
+    then
+        echo >&2 "error: failed to initialise environment list"
+        exit 90
+    elif [[ ${t1} -ne 0 ]] || [[ ${t2} -ne 0 ]]
+    then
+        checkFileRW "${datadir}/${cfgdir}/${envnames}" Y
+        t1=$?
+        checkFileRW "${datadir}/${cfgdir}/${envdescs}" Y
+        t2=$?
+        if [[ ${t1} -ne 0 ]] || [[ ${t2} -ne 0 ]]
+        then
+            echo >&2 "error: failed to initialise environment list"
+            exit 90
+        fi
+        getNwEnv list >"${datadir}/${cfgdir}/${envnames}" 2>/dev/null
+        if [[ $? -ne 0 ]]
+        then
+            echo >&2 "error: failed to initialise environment list"
+            exit 90
+        fi
+        echo "${unknownname}" >>"${datadir}/${cfgdir}/${envnames}" 2>/dev/null
+        getNwEnv list -verbose >"${datadir}/${cfgdir}/${envdescs}" 2>/dev/null
+        if [[ $? -ne 0 ]]
+        then
+            echo >&2 "error: failed to initialise environment list"
+            exit 90
+        fi
+        echo "${unknownname}:${unknowndesc}" >>"${datadir}/${cfgdir}/${envdescs}" 2>/dev/null
+    fi
+
+    return 0
+}
+
+initTmp()
+{
+    mytmp=`mktemp -d -q "${datadir}/${tmpdir}/new.XXXXX"`
+    if [[ $? -ne 0 ]]
+    then
+        echo >&2 "error: failed to create temporary directory"
+        return 1
+    fi
+    return 0
+}
+
+listActions()
+{
+    local envs
+    local en
+    local ev
+    local cmd
+    local notify
+    local nfopt
+    local -i script=1
+    local -i ret=0
+    local -i tret=0
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    fi
+    if [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-script" ]]
+        then
+            script=0
+        else
+            usage
+        fi
+    fi
+
+    if ! cd "${datadir}/${actdir}" >& /dev/null
+    then
+        echo >&2 "error: unable to access '${datadir}/${actdir}'"
+        return 1
+    fi
+
+    if [[ ${script} -eq 0 ]]
+    then
+        echo "${me} clear ${envAll} b"
+    fi
+
+    envs=`ls`
+    if [[ "${envs}" == "" ]]
+    then
+        return 0
+    fi
+
+    for en in ${envs}
+    do
+        for ev in a i
+        do
+	    checkFileR "${en}/${ev}/${notifyfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                echo >&2 "error: unable to access '${en}/${ev}/${cmdfile}'"
+                ret=1
+            elif [[ ${tret} -eq 0 ]]
+            then
+                notify=n
+                nfopt="-notify "
+            else
+                notify=s
+                nfopt="-silent "
+            fi
+
+            checkFileRX "${en}/${ev}/${cmdfile}"
+            tret=$?
+            if [[ ${tret} -gt 1 ]]
+            then
+                echo >&2 "error: unable to access '${en}/${ev}/${cmdfile}'"
+                ret=1
+            elif [[ ${tret} -eq 0 ]]
+            then
+                cmd=`cat "${en}/${ev}/${cmdfile}"`
+                if [[ "${notify}" == "n" ]]
+                then
+                    nfopt=""
+                fi
+            else
+                cmd=""
+            fi
+
+            if [[ "${notify}" != "s" ]] || [[ "${cmd}" != "" ]]
+            then
+                if [[ ${script} -eq 0 ]]
+                then
+                    cmd=`echo "${cmd}" | sed -e "s/#E#/'#E#'/g" -e "s/#A#/'#A#'/g"`
+                    echo "${me} set ${en} ${ev} ${nfopt}${cmd}"
+                else
+                    echo "${en} ${ev} ${notify} ${cmd}"
+                fi
+            fi
+            
+        done
+    done
+
+    return ${ret}
+}
+
+listActive()
+{
+    if [[ $# -ne 0 ]]
+    then
+        usage
+    fi
+
+    doStatus >& /dev/null
+    if [[ $? -ne 0 ]]
+    then
+        echo >&2 "error: no running monitor"
+        return 1
+    fi
+
+    if [[ ${enablePower} -eq 0 ]]
+    then
+        if checkFileR "${datadir}/${tmpdir}/${batteryfile}"
+        then
+            echo "${envBattery}"
+        fi
+    fi
+    if checkFileR "${datadir}/${tmpdir}/${envfile}"
+    then
+        cat "${datadir}/${tmpdir}/${envfile}"
+    fi
+
+    return 0
+}
+
+listEnvironments()
+{
+    local f
+    local -i ret=0
+    local -i tret=0
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    fi
+    if [[ $# -eq 1 ]]
+    then
+        if [[ "$1" != "-verbose" ]]
+        then
+            usage
+        fi
+    fi
+
+    if [[ "$1" == "-verbose" ]]
+    then
+        f="${datadir}/${cfgdir}/${envdescs}"
+    else
+        f="${datadir}/${cfgdir}/${envnames}"
+    fi
+    checkFileR "${f}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to access '${f}'"
+        ret=2
+    elif [[ ${tret} -eq 1 ]]
+    then
+        echo >&2 "error: '${f}' not present"
+        ret=1
+    else
+        if [[ "$1" == "-verbose" ]]
+        then
+            echo "${envWake}:${envWakeDesc}"
+            if [[ ${enablePower} -eq 0 ]]
+            then
+                echo "${envBattery}:${envBatteryDesc}"
+            fi
+        else
+            echo "${envWake}"
+            if [[ ${enablePower} -eq 0 ]]
+            then
+                echo "${envBattery}"
+            fi
+        fi
+        cat "${f}"
+        if [[ "$1" == "-verbose" ]]
+        then
+            echo "${envDefault}:${envDefaultDesc}"
+            echo "${envAll}:${envAllDesc}"
+        else
+            echo "${envDefault}"
+            echo "${envAll}"
+        fi
+    fi
+
+    return ${ret}
+}
+
+doList()
+{
+    local -i ret=0
+
+    case "$1" in
+        "environments")
+            shift
+            listEnvironments "$@"
+            ret=$?
+            ;;
+        "actions")
+            shift
+            listActions "$@"
+            ret=$?
+            ;;
+        "active")
+            shift
+            listActive "$@"
+            ret=$?
+            ;;
+        *)
+            usage
+            ;;
+    esac
+
+    return ${ret}
+}
+
+getMonitorPID()
+{
+    local -a mpid
+    local -a ppid
+    local -i npid=0
+    local tpid
+    local tppid
+
+    while read tpid tppid
+    do
+        mpid[${npid}]="${tpid}"
+        ppid[${npid}]="${tppid}"
+        npid=${npid}+1
+    done
+    if [[ ${npid} -eq 0 ]]
+    then
+        return 0
+    fi
+    if [[ ${npid} -eq 1 ]]
+    then
+        echo "${mpid[0]}"
+        return 0
+    fi
+    if [[ ${npid} -gt 2 ]]
+    then
+        echo >&2 "multiple monitor tasks running"
+        return 1
+    fi
+    if [[ "${mpid[1]}" -eq "${ppid[0]}" ]]
+    then
+       echo "${mpid[1]}"
+       return 0
+    elif [[ "${mpid[0]}" -eq "${ppid[1]}" ]]
+    then
+       echo "${mpid[0]}"
+       return 0
+    else
+         echo >&2 "multiple monitor tasks running"
+         return 1
+    fi
+}
+
+verboseStatus()
+{
+    local spid=""
+    local rpid=""
+    local -i n=0
+    local -i npid=0
+
+    if [[ ${useSW} -eq 1 ]] || [[ ${forcepoll} -eq 0 ]]
+    then
+        echo "info: sleepwatcher not in use"
+    else
+        if checkFileR "${datadir}/${tmpdir}/${swpidfile}"
+        then
+            spid=`cat "${datadir}/${tmpdir}/${swpidfile}"`
+        fi
+        n=0
+        while [[ ${n} -lt 5 ]]
+        do
+            rpid=`ps -f -u ${myuid} | grep "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup" | grep -v grep | awk '{ print $2 }'`
+            if [[ "${rpid}" == "" ]]
+            then
+                break
+            else
+                npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+                if [[ ${npid} -eq 1 ]]
+                then
+                    break
+                fi
+            fi
+            sleep 1
+            n=${n}+1
+        done
+        if [[ "${rpid}" == "" ]]
+        then
+            if [[ "${spid}" == "" ]]
+            then
+                echo "info: sleepwatcher is not running"
+            else
+                echo >&2 "error: sleepwatcher state mismatch: stored=running(${spid}), actual=stopped"
+            fi
+        else
+            npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+            if [[ ${npid} -gt 1 ]]
+            then
+                echo >&2 "error: multiple sleepwatcher processes detected(${rpid})"
+            elif [[ "${spid}" == "" ]]
+            then
+                echo >&2 "error: sleepwatcher state mismatch: stored=stopped, actual=running(${rpid})"
+            elif [[ "${spid}" != "${rpid}" ]]
+            then
+                echo >&2 "error: sleepwatcher state mismatch: stored=running(${spid}), actual=running(${rpid})"
+            else
+                echo "info: sleepwatcher is running(${rpid})"
+            fi
+        fi
+    fi
+
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        echo "info: netwatcher not in use"
+    else
+        if checkFileR "${datadir}/${tmpdir}/${nwpidfile}"
+        then
+            spid=`cat "${datadir}/${tmpdir}/${nwpidfile}"`
+        fi
+        n=0
+        while [[ ${n} -lt 5 ]]
+        do
+            rpid=`ps -f -u ${myuid} | grep "${netwatcher}" | grep -v grep | awk '{ print $2 }'`
+            if [[ "${rpid}" == "" ]]
+            then
+                break
+            else
+                npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+                if [[ ${npid} -eq 1 ]]
+                then
+                    break
+                fi
+            fi
+            sleep 1
+            n=${n}+1
+        done
+        if [[ "${rpid}" == "" ]]
+        then
+            if [[ "${spid}" == "" ]]
+            then
+                echo "info: netwatcher is not running"
+            else
+                echo >&2 "error: netwatcher state mismatch: stored=running(${spid}), actual=stopped"
+            fi
+        else
+            npid=`echo "${rpid}" | wc -l | awk '{ print $1 }'`
+            if [[ ${npid} -gt 1 ]]
+            then
+                echo >&2 "error: multiple netwatcher processes detected(${rpid})"
+            elif [[ "${spid}" == "" ]]
+            then
+                echo >&2 "error: netwatcher state mismatch: stored=stopped, actual=running(${rpid})"
+            elif [[ "${spid}" != "${rpid}" ]]
+            then
+                echo >&2 "error: netwatcher state mismatch: stored=running(${spid}), actual=running(${rpid})"
+            else
+                echo "info: netwatcher is running(${rpid})"
+            fi
+        fi
+    fi
+
+    if checkFileR "${datadir}/${tmpdir}/${reffile}"
+    then
+        echo "info: refresh marked as pending"
+    fi
+
+    return 0
+}
+
+doStatus()
+{
+    local -ri maxTries=15
+    local spid=""
+    local rpid=""
+    local plist=""
+    local name="monitor"
+    local -i verbose=1
+    local -i tryCount=0
+    local -i isagent=1
+    local -i haveplist=1
+    local -i ret=0
+    local -i tret=0
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    elif [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-verbose" ]]
+        then
+            verbose=0
+        else
+            usage
+        fi
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${lanamef}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to access '${datadir}/${cfgdir}/${lanamef}'"
+        return 7
+    elif [[ ${tret} -eq 0 ]]
+    then
+        isagent=0
+        name="agent"
+        plist=`cat "${datadir}/${cfgdir}/${lanamef}"`
+        plist="${ladir}/${plist}.plist"
+        if checkFileRW "${plist}"
+        then
+            haveplist=0
+        fi
+    fi
+    if [[ ${isagent} -ne ${haveplist} ]]
+    then
+        echo >&2 "error: incorrect agent configuration"
+        return 2
+    fi
+
+    checkFileRW "${datadir}/${tmpdir}/${pidfile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to access '${datadir}/${tmpdir}/${pidfile}'"
+        return 6
+    elif [[ ${tret} -eq 0 ]]
+    then
+        spid=`cat "${datadir}/${tmpdir}/${pidfile}"`
+    fi
+
+    while [[ ${tryCount} -lt ${maxTries} ]]
+    do
+        rpid=`ps -f -u ${myuid} | grep "${me} _zzinternal" | grep -v grep | awk '{ print $2, $3 }' | getMonitorPID 2>&1`
+        tret=$?
+        if [[ ${tret} -eq 0 ]]
+        then
+            break
+        fi
+        tryCount=${tryCount}+1
+        sleep 1
+    done
+    if [[ ${tret} -ne 0 ]]
+    then
+        echo >&2 "error: ${rpid}"
+        return 7
+    fi
+
+    if [[ "${rpid}" == "" ]]
+    then
+        if [[ "${spid}" == "" ]]
+        then
+            echo "info: ${name} is not running"
+            ret=1
+        else
+            echo >&2 "error: ${name} state mismatch: stored=running(${spid}), actual=stopped"
+            ret=3
+        fi
+    else
+        if [[ "${spid}" == "" ]]
+        then
+            echo >&2 "error: ${name} state mismatch: stored=stopped, actual=running(${rpid})"
+            ret=4
+        elif [[ "${spid}" != "${rpid}" ]]
+        then
+            echo >&2 "error: ${name} state mismatch: stored=running(${spid}), actual=running(${rpid})"
+            ret=5
+        else
+            echo "info: ${name} is running(${rpid})"
+            ret=0
+        fi
+    fi
+
+    if [[ ${verbose} -eq 0 ]]
+    then
+        verboseStatus
+    fi
+
+    return ${ret}
+}
+
+doStop()
+{
+    local res
+    local pid=""
+    local name="monitor"
+    local plist=""
+    local -i isagent=1
+    local -i count=0
+    local -i ret=0
+
+    if [[ $# -ne 0 ]]
+    then
+        usage
+    fi
+
+    res=`doStatus 2>&1`
+    ret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+
+    if isAgent
+    then
+        isagent=0
+        name="agent"
+    fi
+
+    case ${ret} in
+        0)
+            pid=`echo "${res}" | sed -e 's/^.* running(//' -e 's/).*$//'`
+            ;;
+        1)
+            echo "info: ${res}"
+            return 0
+            ;;
+        3)
+            rm -f "${datadir}/${tmpdir}/${pidfile}" >& /dev/null
+            if [[ -e "${datadir}/${tmpdir}/${pidfile}" ]]
+            then
+                echo >&2 "error: unable to remove '${datadir}/${tmpdir}/${pidfile}'"
+                return 2
+            else
+                echo "info: ${name} is not running (cleaned up stale state)"
+                return 0
+            fi
+            ;;
+        4)
+            pid=`echo "${res}" | sed -e 's/^.* actual=running(//' -e 's/).*$//'`
+            ;;
+        5)
+            pid=`echo "${res}" | sed -e 's/^.* actual=running(//' -e 's/).*$//'`
+            ;;
+        *)
+            echo >&2 "error: ${res}"
+            return 2
+            ;;
+    esac
+
+    if [[ ${isagent} -eq 0 ]]
+    then
+        plist=`cat "${datadir}/${cfgdir}/${lanamef}"`
+        plist="${ladir}/${plist}.plist"
+        launchctl unload "${plist}" >& /dev/null
+    fi
+    if [[ "${pid}" == "" ]]
+    then
+        echo >&2 "error: unable to determine pid of ${name}"
+        return 2
+    fi
+    kill -USR2 ${pid} >& /dev/null
+
+    res=`doStatus 2>&1`
+    ret=$?
+    while [[ ${ret} -ne 1 ]] && [[ ${count} -lt 10 ]]
+    do
+        sleep 1
+        res=`doStatus 2>&1`
+        ret=$?
+        count=${count}+1
+    done
+
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+
+    if [[ ${ret} -ne 1 ]]
+    then
+        echo >&2 "error: failed to stop ${name}(${pid}) - ${res}"
+        ret=1
+    else
+        echo "info: stopped ${name}(${pid})"
+        ret=0
+    fi
+
+    return ${ret}
+}
+
+doStart()
+{
+    local res
+    local plist=""
+    local -i count=0
+    local -i ret=0
+
+    if [[ $# -ne 0 ]]
+    then
+        usage
+    fi
+
+    if ! isAgent
+    then
+        echo >&2 "error: agent is not configured"
+        return 2
+    fi
+
+    res=`doStatus 2>&1`
+    ret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+
+    if [[ ${ret} -eq 0 ]]
+    then
+        echo "info: ${res}"
+        return 0
+    elif [[ ${ret} -ne 1 ]] && [[ ${ret} -ne 3 ]]
+    then
+        echo >&2 "error: ${res}"
+        return 2
+    fi
+
+    plist=`cat "${datadir}/${cfgdir}/${lanamef}"`
+    plist="${ladir}/${plist}.plist"
+    launchctl load "${plist}" >& /dev/null
+
+    res=`doStatus 2>&1`
+    ret=$?
+    while [[ ${ret} -ne 0 ]] && [[ ${count} -lt 10 ]]
+    do
+        sleep 1
+        res=`doStatus 2>&1`
+        ret=$?
+        count=${count}+1
+    done
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+
+    if [[ ${ret} -ne 0 ]]
+    then
+        echo >&2 "error: failed to start agent - ${res}"
+        ret=1
+    else
+        echo "info: ${res}"
+        ret=0
+    fi
+
+    return ${ret}
+}
+
+doRefresh()
+{
+    local res
+    local pid
+    local -i count=0
+    local -i force=1
+    local -i tret
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    fi
+    if [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-force" ]]
+        then
+            force=0
+        else
+            usage
+        fi
+    fi
+
+    if [[ ${force} -eq 1 ]]
+    then
+        if [[ ! -e "${datadir}/${tmpdir}/${reffile}" ]]
+        then
+            echo "info: nothing to refresh"
+            return 0
+        fi
+    fi
+
+    res=`doStatus 2>&1`
+    if [[ $? -ne 0 ]]
+    then
+        res=`echo "${res}" | sed -e 's/^.*: //'`
+        echo >&2 "error: ${res}"
+        return 1
+    fi
+    checkFileRW "${datadir}/${tmpdir}/${pidfile}"
+    tret=$?
+    if [[ ${tret} -ne 0 ]]
+    then
+        echo >&2 "error: unable to access '${datadir}/${tmpdir}/${pidfile}'"
+        return 2
+    fi
+    pid=`cat "${datadir}/${tmpdir}/${pidfile}"`
+    if [[ "${pid}" == "" ]]
+    then
+        echo >&2 "error: unable to determine pid of monitor"
+        return 3
+    fi
+    if ! kill -USR1 ${pid} >& /dev/null
+    then
+        echo >&2 "error: failed to signal refresh to pid ${pid}"
+        return 4
+    fi
+
+    rm -f "${datadir}/${tmpdir}/${reffile}" >& /dev/null
+    if [[ -e "${datadir}/${tmpdir}/${reffile}" ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${tmpdir}/${reffile}'"
+        return 5
+    fi
+
+    echo "info: refreshed monitor(${pid})"
+
+    return 0
+}
+
+shutdown()
+{
+    local -i notify=$1
+
+    intr=1
+    if stopSleepwatcher
+    then
+        logMsg "sleepwatcher stopped"
+    fi
+    intr=1
+    if stopNetwatcher
+    then
+        logMsg "netwatcher stopped"
+    fi
+
+    rm -f "${datadir}/${actdir}/${sleepfile}" >& /dev/null
+    rm -f "${datadir}/${actdir}/${wakefile}" >& /dev/null
+    rm -f "${datadir}/${actdir}/${nwchangefile}" >& /dev/null
+
+    logMsg "monitor stopped"
+    if [[ ${notify} -eq 0 ]]
+    then
+        sendNotification "Stopped"
+    fi
+
+    return 0
+}
+
+logConfigInfo()
+{
+    logMsg "    warntimeout = ${cmdwarntimeout}"
+    logMsg "    killtimeout = ${cmdkilltimeout}"
+    logMsg "    maxlogs = ${maxlogs}"
+    if [[ "${actlog}" != "" ]]
+    then
+        logMsg "    action log = '${actlog}'"
+    else
+        logMsg "    action log = <not defined>"
+    fi
+    if [[ ${enablePower} -eq 0 ]]
+    then
+        logMsg "    power source detection enabled"
+        logMsg "    battery sleep quantum = ${btSQ}"
+    fi
+    logMsg "    AC sleep quantum = ${acSQ}"
+    return 0
+}
+
+doInternal()
+{
+    local -ri nwMaxRestarts=5
+    local -ri swMaxRestarts=5
+    local -i nwRestarts=0
+    local -i swRestarts=0
+    local -i prvts=0
+    local -i curts=0
+    local -i delta=0
+    local -i tret=0
+    local -i ts1=0
+    local -i ts2=0
+    local -i interval=$2
+    local -i settle=$3
+    local -i notify=$5
+    local -i agent=$7
+    local swpid
+    local nwpid
+    local tmp1
+    local tmp2
+
+    mylog="$1"
+    wakeCheckValue=$4
+    forcepoll=$6
+    debug=$8
+
+#
+# Initialisation stuff
+#
+    trap "setinterrupt" INT HUP TERM USR2
+    trap "setrefresh" USR1
+    trap "setchilddied" CHLD
+
+    if [[ ${agent} -eq 0 ]]
+    then
+        cleanupInternal 1
+    fi
+
+    ts1=`date '+%s'`
+
+    clearWake
+    clearEvent
+
+    mypid="${datadir}/${tmpdir}/${pidfile}"
+    echo $$ > "${mypid}"
+
+    logMsg "----------------------------------------"
+    logMsg "monitor version ${version} started, pid = $$"
+    if [[ ${notify} -eq 0 ]]
+    then
+        sendNotification "Version ${version} started"
+    fi
+
+#
+# Load configuration
+#
+    if ! monRefresh Y
+    then
+        logMsg "monitor stopped"
+        if [[ ${notify} -eq 0 ]]
+        then
+            sendNotification "Stopped"
+        fi
+        return 0
+    fi
+
+    logMsg "    settle = ${settle}"
+    logMsg "    interval = ${interval}"
+    logConfigInfo
+    if [[ ${forcepoll} -eq 0 ]]
+    then
+        logMsg "    forcing use of poll mode (-poll)"
+    fi
+    if [[ ${notify} -eq 0 ]] && [[ "${notifier}" == "" ]]
+    then
+        logMsg "WARNING: notifications disabled because 'terminal-notifier' is not installed"
+    fi
+
+#
+# Try to start 'sleepwatcher'
+#
+    if [[ ${forcepoll} -ne 0 ]] && [[ ${useSW} -eq 0 ]]
+    then
+        swpid=`startSleepwatcher`
+        tret=$?
+        if [[ ${tret} -gt 1 ]]
+        then
+            SWpid=0
+            useSW=1
+            logMsg "WARNING: sleepwatcher is not available, falling back to polling mechanism"
+        elif [[ ${tret} -eq 0 ]]
+        then
+            SWpid=${swpid}
+            logMsg "sleepwatcher started, pid = ${swpid}"
+        else
+            SWpid=0
+            logMsg "ERROR: failed to start sleepwatcher, falling back to polling mechanism"
+        fi
+        clearWake
+    fi
+
+#
+# Start 'netwatcher'
+#
+    if [[ ${forcepoll} -ne 0 ]]
+    then
+        nwpid=`startNetwatcher`
+        tret=$?
+        if [[ ${tret} -eq 0 ]]
+        then
+            NWpid=${nwpid}
+            logMsg "netwatcher started, pid = ${nwpid}"
+        else
+            NWpid=0
+            logMsg "ERROR: failed to start netwatcher, falling back to polling mechanism"
+        fi
+        clearEvent
+    fi
+
+#
+# Compute settle time
+#
+    if [[ ${settle} -eq 0 ]]
+    then
+        ts2=0
+    else
+        ts2=`date '+%s'`
+        ts1=${ts2}-${ts1}
+        ts2=${settle}-${ts1}
+        if [[ ${ts2} -lt 0 ]]
+        then
+           ts2=0
+        fi
+    fi
+#
+# Settle
+#
+    if [[ ${settle} -gt 0 ]]
+    then
+        if ! monSleep ${ts2} 1 1 1 1
+        then
+            shutdown ${notify}
+            return 0
+        fi
+    fi
+
+#
+# Register existing state(s)
+#
+
+    if [[ ${enablePower} -eq 0 ]]
+    then
+        initPower Y
+        if checkPower
+        then
+            clearPower
+    
+            if ! monDoPower ${notify}
+            then
+                break
+            fi
+            prvBattery=${curBattery}
+    
+            if [[ ${intr} -eq 0 ]]
+            then
+                break
+            fi
+        fi
+    fi
+
+    clearEvent
+    if ! monGetActive
+    then
+        break
+    fi
+    if ! monDoActions ${notify}
+    then
+        break
+    fi
+    prvAct=( ${curAct[@]} )
+
+#
+# Main event checking and action loop
+#
+
+    while [[ ${intr} -ne 0 ]]
+    do
+        prvts=`date '+%s'`
+#        debugMsg "ACTION CYCLE START - time = ${prvts}"
+
+#
+# Check if we need to refresh and if so do it.
+#
+        if [[ ${refresh} -eq 0 ]]
+        then
+            logMsg "refresh started"
+            refresh=1
+            if ! monRefresh
+            then
+                break
+            fi
+            logConfigInfo
+            logMsg "refresh completed"
+            if [[ ${notify} -eq 0 ]]
+            then
+                sendNotification "Refreshed"
+            fi
+        fi
+
+#
+# If 'sleepwatcher' is in use, check that it is running and if not try to restart it
+#
+        if [[ ${forcepoll} -ne 0 ]]
+        then
+            if [[ "${sleepwatcher}" != "" ]] && [[ ${SWpid} -ne 0 ]]
+            then
+                if ! kill -0 ${SWpid} >& /dev/null
+                then
+                    SWpid=0
+                fi
+            fi
+            if [[ "${sleepwatcher}" != "" ]] && \
+               [[ ${SWpid} -eq 0 ]] && \
+               [[ ${swRestarts} -le ${swMaxRestarts} ]]
+            then
+                if [[ ${swRestarts} -eq ${swMaxRestarts} ]]
+                then
+                    logMsg "ERROR: sleepwatcher restart retries exhausted, using polling mechanism"
+                    useSW=1
+                else
+                    logMsg "ERROR: sleepwatcher is not running!"
+                    swpid=`startSleepwatcher`
+                    tret=$?
+                    if [[ ${tret} -gt 1 ]]
+                    then
+                        logMsg "WARNING: sleepwatcher is no longer available, using polling mechanism"
+                        useSW=1
+                    elif [[ ${tret} -eq 0 ]]
+                    then
+                        SWpid=${swpid}
+                        logMsg "sleepwatcher restarted, pid = ${swpid}"
+                    else
+                        logMsg "ERROR: failed to restart sleepwatcher, switching to polling mechanism"
+                    fi
+                fi
+                clearWake
+                initPower
+                swRestarts=${swRestarts}+1
+            fi
+            if [[ ${intr} -eq 0 ]]
+            then
+                break
+            fi
+        fi
+
+#
+# Check that 'netwatcher' is running and if not try to restart it
+#
+        if [[ ${forcepoll} -ne 0 ]]
+        then
+            if [[ ${NWpid} -ne 0 ]]
+            then
+                if ! kill -0 ${NWpid} >& /dev/null
+                then
+                    NWpid=0
+                fi
+            fi
+            if [[ ${NWpid} -eq 0 ]] && [[ ${nwRestarts} -le ${nwMaxRestarts} ]]
+            then
+                if [[ ${nwRestarts} -eq ${nwMaxRestarts} ]]
+                then
+                    logMsg "ERROR: netwatcher restart retries exhausted, using polling mechanism"
+                else
+                    logMsg "ERROR: netwatcher is not running!"
+                    nwpid=`startNetwatcher`
+                    tret=$?
+                    if [[ ${tret} -eq 0 ]]
+                    then
+                        NWpid=${nwpid}
+                        logMsg "netwatcher restarted, pid = ${nwpid}"
+                    else
+                        logMsg "ERROR: failed to restart netwatcher, using polling mechanism"
+                    fi
+                fi
+                clearEvent
+                nwRestarts=${nwRestarts}+1
+            fi
+            if [[ ${intr} -eq 0 ]]
+            then
+                break
+            fi
+        fi
+
+#
+# Check for and handle any wake events
+#
+        if checkWake
+        then
+            tmp1=`cvtTS "${slpTS}"`
+            tmp2=`cvtTS "${wakeTS}"`
+            logMsg "system slept at ${tmp1}, woke at ${tmp2}"
+
+            if [[ ${settle} -gt 0 ]]
+            then
+                ts1=`date '+%s'`
+                ts1=${ts1}-${wakeTS}
+                ts2=${settle}-${ts1}
+                if [[ ${SWpid} -gt 0 ]]
+                then
+                    ts2=${ts2}-${swSettleFactor}
+                fi
+                if [[ ${ts2} -lt 0 ]]
+                then
+                   ts2=0
+                fi
+            else
+                ts2=${settle}
+            fi
+
+            clearWake
+            if [[ ${settle} -gt 0 ]]
+            then
+                if ! monSleep ${ts2} 1 1 1 1
+                then
+                    break
+                fi
+                clearEvent
+            fi
+
+            if [[ ${wakeAN} -eq 0 ]] || [[ "${wakeA}" != "" ]]
+            then
+                if ! monDoWake ${notify}
+                then
+                    break
+                fi
+            fi
+        fi
+
+#
+# Check for and handle any power events
+#
+        if [[ ${enablePower} -eq 0 ]]
+        then
+            if checkPower
+            then
+                clearPower
+    
+                if ! monDoPower ${notify}
+                then
+                    break
+                fi
+                prvBattery=${curBattery}
+    
+                if [[ ${intr} -eq 0 ]]
+                then
+                    break
+                fi
+            fi
+        fi
+
+#
+# Check for and handle any network events
+#
+        if [[ ${forcepoll} -ne 0 ]]
+        then
+            checkEvent
+            tret=$?
+        else
+            tret=0
+        fi
+        if [[ ${tret} -eq 0 ]] || [[ ${NWpid} -eq 0 ]]
+        then
+            clearEvent
+
+            if ! monGetActive
+            then
+                break
+            fi
+
+            if ! monDoActions ${notify}
+            then
+                break
+            fi
+    
+            prvAct=( ${curAct[@]} )
+            if [[ ${intr} -eq 0 ]]
+            then
+                break
+            fi
+        fi
+
+#
+# Compute 'sleep' time
+#
+        if [[ ${forcepoll} -eq 0 ]] || \
+           [[ ${NWpid} -eq 0 ]] || \
+           [[ ${SWpid} -eq 0 ]]
+        then
+#
+# Polling mode
+#
+            curts=`date '+%s'`
+            delta=${curts}-${prvts}
+            delta=${interval}-${delta}
+
+#            debugMsg "CURTS = ${curts}"
+#            debugMsg "PRVTS = ${prvts}"
+#            debugMsg "DELTA = ${delta}"
+
+        else
+#
+# Event driven mode
+#
+            delta=${eventModeSleep}
+        fi
+
+#
+# Interruptible sleep until next poll interval or event
+#
+        if [[ ${delta} -gt 0 ]]
+        then
+            if ! monSleep ${delta} 0 0 0 0
+            then
+                break
+            fi
+        fi
+
+#        debugMsg "ACTION CYCLE END"
+    done
+
+    shutdown ${notify}
+
+    return 0
+}
+
+doMonitor()
+{
+    local -i settle=0
+    local -i interval=0
+    local -i notify=1
+    local -i wakecheck=0
+    local -i fg=1
+    local -i agent=1
+    local -i fsettle=1
+    local -i finterval=1
+    local -i fnotify=1
+    local -i fwakecheck=1
+    local -i ffg=1
+    local -i tret
+    local pid
+    local res
+
+    res=`doStatus 2>&1`
+    tret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+    if [[ ${tret} -ne 1 ]] && [[ ${tret} -ne 3 ]]
+    then
+        echo >&2 "error: ${res}"
+        return 2
+    fi
+
+    while [[ $# -gt 0 ]]
+    do
+        case "$1" in
+            "-debug")
+                debug=0
+                ;;
+            "-poll")
+                forcepoll=0
+                ;;
+            "-agent")
+                agent=0
+                ;;
+            "-fg")
+                if [[ ${ffg} -eq 0 ]]
+                then
+                    usage
+                fi
+                fg=0
+                ffg=0
+                ;;
+            "-nonotify")
+                if [[ ${fnotify} -eq 0 ]]
+                then
+                    usage
+                fi
+                notify=1
+                fnotify=0
+                ;;
+            "-notify")
+                if [[ ${fnotify} -eq 0 ]]
+                then
+                    usage
+                fi
+                notify=0
+                fnotify=0
+                ;;
+            "-settle")
+                if [[ ${fsettle} -eq 0 ]]
+                then
+                    usage
+                fi
+                fsettle=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-settle' must be numeric"
+                    return 1
+                fi
+                settle=$1
+                if [[ ${settle} -lt ${minSettle} ]] || [[ ${settle} -gt ${maxSettle} ]]
+                then
+                    echo >&2 "error: value for '-settle' must be between ${minSettle} and ${maxSettle}"
+                    return 1
+                fi
+                ;;
+            "-interval")
+                if [[ ${finterval} -eq 0 ]]
+                then
+                    usage
+                fi
+                finterval=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-interval' must be numeric"
+                    return 1
+                fi
+                interval=$1
+                if [[ ${interval} -lt ${minInterval} ]] || [[ ${interval} -gt ${maxInterval} ]]
+                then
+                    echo >&2 "error: value for '-interval' must be between ${minInterval} and ${maxInterval}"
+                    return 1
+                fi
+                ;;
+            "-wakecheck")
+                if [[ ${fwakecheck} -eq 0 ]]
+                then
+                    usage
+                fi
+                fwakecheck=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-wakecheck' must be numeric"
+                    return 1
+                fi
+                wakecheck=$1
+                if [[ ${wakecheck} -lt ${minWakeCheck} ]] || [[ ${wakecheck} -gt ${maxWakeCheck} ]]
+                then
+                    echo >&2 "error: value for '-wakecheck' must be between ${minWakeCheck} and ${maxWakeCheck}"
+                    return 1
+                fi
+                ;;
+            *)
+                usage
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ${fsettle} -eq 1 ]]
+    then
+        settle=${dfltSettle}
+    fi
+    if [[ ${finterval} -eq 1 ]]
+    then
+        interval=${dfltInterval}
+    fi
+    if [[ ${fwakecheck} -eq 1 ]]
+    then
+        wakecheck=${dfltWakeCheck}
+    fi
+
+    if ! checkFileRW "${datadir}/${tmpdir}/${pidfile}" Y
+    then
+        echo >&2 "error: unable to create '${datadir}/${tmpdir}/${pidfile}'"
+        return 4
+    fi
+
+    if [[ ${fg} -eq 1 ]]
+    then
+        "${mypath}" _zzinternal "${datadir}/${logdir}/${logfile}" ${interval} ${settle} ${wakecheck} ${notify} ${forcepoll} ${agent} ${debug} &
+        echo "info: monitor is running($!)"
+    else
+        exec "${mypath}" _zzinternal "${datadir}/${logdir}/${logfile}" ${interval} ${settle} ${wakecheck} ${notify} ${forcepoll} ${agent} ${debug}
+    fi
+
+    return 0
+}
+
+doUninstall()
+{
+    local url=""
+    local nf="-nonotify"
+    local plist=""
+    local res=""
+    local -i tret
+
+    if [[ $# -ne 0 ]]
+    then
+        uage
+    fi
+
+    if ! isAgent
+    then
+        echo "info: agent is not configured"
+        return 0
+    fi
+
+    plist=`cat "${datadir}/${cfgdir}/${lanamef}"`
+    plist="${ladir}/${plist}.plist"
+
+    res=`doStatus 2>&1`
+    tret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+    if [[ ${tret} -ne 1 ]]
+    then
+        echo >&2 "error: ${res}"
+        return 2
+    fi
+
+    rm -f "${plist}" >& /dev/null
+    rm -f "${datadir}/${cfgdir}/${lanamef}" >& /dev/null
+
+    return 0
+}
+
+doInstall()
+{
+    local -i settle=0
+    local -i interval=0
+    local -i wakecheck=0
+    local url=""
+    local nf="-nonotify"
+    local plist=""
+    local res=""
+    local -i tret
+    local -i fsettle=1
+    local -i finterval=1
+    local -i fwakecheck=1
+    local -i fnotify=1
+
+    res=`doStatus 2>&1`
+    tret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+    if [[ ${tret} -ne 1 ]]
+    then
+        echo >&2 "error: ${res}"
+        return 2
+    fi
+
+    while [[ $# -gt 0 ]]
+    do
+        case "$1" in
+            "-notify")
+                if [[ ${fnotify} -eq 0 ]]
+                then
+                    usage
+                fi
+                nf="-notify"
+                fnotify=0
+                ;;
+            "-settle")
+                if [[ ${fsettle} -eq 0 ]]
+                then
+                    usage
+                fi
+                fsettle=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-settle' must be numeric"
+                    return 1
+                fi
+                settle=$1
+                if [[ ${settle} -lt ${minSettle} ]] || [[ ${settle} -gt ${maxSettle} ]]
+                then
+                    echo >&2 "error: value for '-settle' must be between ${minSettle} and ${maxSettle}"
+                    return 1
+                fi
+                ;;
+            "-interval")
+                if [[ ${finterval} -eq 0 ]]
+                then
+                    usage
+                fi
+                finterval=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-interval' must be numeric"
+                    return 1
+                fi
+                interval=$1
+                if [[ ${interval} -lt ${minInterval} ]] || [[ ${interval} -gt ${maxInterval} ]]
+                then
+                    echo >&2 "error: value for '-interval' must be between ${minInterval} and ${maxInterval}"
+                    return 1
+                fi
+                ;;
+            "-wakecheck")
+                if [[ ${fwakecheck} -eq 0 ]]
+                then
+                    usage
+                fi
+                fwakecheck=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: value for '-wakecheck' must be numeric"
+                    return 1
+                fi
+                wakecheck=$1
+                if [[ ${wakecheck} -lt ${minWakeCheck} ]] || [[ ${wakecheck} -gt ${maxWakeCheck} ]]
+                then
+                    echo >&2 "error: value for '-wakecheck' must be between ${minWakeCheck} and ${maxWakeCheck}"
+                    return 1
+                fi
+                ;;
+            *)
+                if [[ "${url}" != "" ]]
+                then
+                    usage
+                fi
+                url="$1"
+                ;;
+        esac
+        shift
+    done
+
+    if [[ "${url}" == "" ]]
+    then
+        url="${dfltAgentName}"
+    fi
+    plist="${ladir}/${url}.plist"
+
+    if [[ ${fsettle} -eq 1 ]]
+    then
+        settle=${dfltSettle}
+    fi
+    if [[ ${finterval} -eq 1 ]]
+    then
+        interval=${dfltInterval}
+    fi
+    if [[ ${fwakecheck} -eq 1 ]]
+    then
+        wakecheck=${dfltWakeCheck}
+    fi
+
+    if ! checkFileRW "${datadir}/${cfgdir}/${lanamef}" Y
+    then
+        echo >&2 "error: unable to create '${datadir}/${cfgdir}/${lanamef}'"
+        return 2
+    fi
+    echo "${url}" > "${datadir}/${cfgdir}/${lanamef}"
+
+    if ! checkFileRW "${plist}" Y
+    then
+        rm -f "${datadir}/${cfgdir}/${lanamef}"
+        echo >&2 "error: unable to create '${plist}'"
+        return 3
+    fi
+
+    cat - > "${plist}" 2>/dev/null <<!!!
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+        <key>Label</key>
+        <string>${url}</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+        <key>ProgramArguments</key>
+        <array>
+        <string>${mypath}</string>
+        <string>monitor</string>
+        <string>-settle</string>
+        <string>${settle}</string>
+        <string>-interval</string>
+        <string>${interval}</string>
+        <string>-wakecheck</string>
+        <string>${wakecheck}</string>
+        <string>${nf}</string>
+        <string>-fg</string>
+        <string>-agent</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>KeepAlive</key>
+        <true/>
+        <key>AbandonProcessGroup</key>
+        <true/>
+</dict>
+</plist>
+!!!
+
+    if [[ $? -ne 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${lanamef}"
+        rm -f "${plist}"
+        echo >&2 "error: unable to create '${plist}'"
+        return 4
+    fi
+
+    return 0
+}
+
+doClear()
+{
+    local a
+    local act
+    local envt
+    local elist
+    local tmp
+    local -i verbose=1
+    local -i didsomething=1
+    local -i tret
+
+    if [[ $# -lt 2 ]] || [[ $# -gt 3 ]]
+    then
+        usage
+    fi
+    envt="$1"
+    act="$2"
+    if [[ $# -eq 3 ]]
+    then
+        if [[ "$3" == "-verbose" ]]
+        then
+            verbose=0
+        else
+            usage
+        fi
+    fi
+
+    if [[ ${#act} != 1 ]]
+    then
+        usage
+    fi
+    if [[ ! "${actions}" =~ " ${act} "  ]]
+    then
+        usage
+    fi
+    if [[ "${act}" == "b" ]]
+    then
+        act="a i"
+    fi
+
+    if [[ "${envt}" == "${envAll}" ]]
+    then
+        cd "${datadir}/${actdir}" >& /dev/null
+        if [[ $? != 0 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${actdir}'"
+            return 1
+        fi
+        elist=`ls 2> /dev/null`
+    else
+        elist="${envt}"
+    fi
+
+    for envt in ${elist}
+    do
+        checkDir "${datadir}/${actdir}/${envt}"
+        tret=$?
+        if [[ ${tret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to access '${datadir}/${actdir}/${envt}'"
+            return 1
+        elif [[ ${tret} -eq 0 ]]
+        then
+            for a in ${act}
+            do
+                checkDir "${datadir}/${actdir}/${envt}/${a}"
+                tret=$?
+                if [[ ${tret} -gt 1 ]]
+                then
+                    echo >&2 "error: unable to access '${datadir}/${actdir}/${envt}/${a}'"
+                    return 1
+                elif [[ ${tret} -eq 0 ]]
+                then
+                    if [[ ${verbose} -eq 0 ]]
+                    then
+                        echo "info: removing action '${envt}:${a}'"
+                    fi
+                    rm -rf "${datadir}/${actdir}/${envt}/${a}" >& /dev/null
+                    didsomething=0
+                elif [[ ${verbose} -eq 0 ]]
+                then
+                    echo "info: action '${envt}:${a}' not found"
+                fi
+            done
+            tmp=`ls "${datadir}/${actdir}/${envt}" 2>/dev/null`
+            if [[ "${tmp}" == "" ]]
+            then
+                rm -rf "${datadir}/${actdir}/${envt}" >& /dev/null
+                didsomething=0
+            fi
+        elif [[ ${verbose} -eq 0 ]]
+        then
+            echo "info: no actions found for environment '${envt}'"
+        fi
+    done
+
+    if [[ ${didsomething} -eq 0 ]]
+    then
+        if ! checkFileRW "${datadir}/${tmpdir}/${reffile}" Y
+        then
+            echo >&2 "error: unable to mark refresh"
+            return 2
+        fi
+    fi
+
+    return 0
+}
+
+doSet()
+{
+    local a
+    local act
+    local envt
+    local tenv
+    local elist
+    local cmd
+    local tmp
+    local -i notify=1
+    local -i silent=1
+    local -i didsomething=1
+    local -i tret
+
+    if [[ $# -lt 3 ]]
+    then
+        usage
+    fi
+    envt="$1"
+    act="$2"
+    shift
+    shift
+    if [[ "$1" == "-notify" ]]
+    then
+        notify=0
+        shift
+    elif [[ "$1" == "-silent" ]]
+    then
+        silent=0
+        shift
+    fi
+    cmd="$1"
+
+    if [[ ${notify} -eq 0 ]]
+    then
+        if [[ "${cmd}" != "" ]]
+        then
+            usage
+        fi
+    elif [[ ${silent} -eq 0 ]]
+    then
+        if [[ "${cmd}" == "" ]]
+        then
+            usage
+        fi
+    elif [[ "${cmd}" == "" ]]
+    then
+        usage
+    fi
+
+
+    if [[ ${#act} != 1 ]]
+    then
+        usage
+    fi
+    if [[ ! "${actions}" =~ " ${act} "  ]]
+    then
+        usage
+    fi
+
+    if  [[ "${act}" == "b" ]] || [[ "${act}" == "i" ]] 
+    then
+        if [[ "${envt}" == "${envWake}" ]]
+        then
+            echo >&2 "error: 'i' and 'b' actions not supported for '${envWake}'"
+            return 1
+        fi
+    fi
+
+    if [[ "${act}" == "b" ]]
+    then
+        act="a i"
+    fi
+
+    if [[ "${envt}" == "${envDefault}" ]]
+    then
+        elist="${envt}"
+    elif [[ "${envt}" == "${envWake}" ]]
+    then
+        elist="${envt}"
+    elif [[ "${envt}" == "${envBattery}" ]]
+    then
+        if [[ ${enablePower} -eq 0 ]]
+        then
+            elist="${envt}"
+        else
+            echo >&2 "error: '${envt}' is not a valid environment name"
+            return 2
+        fi
+    elif [[ "${envt}" == "${envAll}" ]]
+    then
+        elist=`cat "${datadir}/${cfgdir}/${envnames}"`
+        elist="${elist} ${envDefault} ${envBattery} ${envWake}"
+    elif ! isValidEnvironment "${envt}"
+    then
+        echo >&2 "error: '${envt}' is not a valid environment name"
+        return 2
+    else
+        elist="${envt}"
+    fi
+
+    if [[ "${cmd}" != "" ]]
+    then
+        if ! checkFileRX "${cmd}"
+        then
+            echo >&2 "error: '${cmd}' does not exist or is not executable"
+            return 3
+        fi
+    fi
+
+    for tenv in ${elist}
+    do
+        if ! checkDir "${datadir}/${actdir}/${tenv}" Y
+        then
+            echo >&2 "error: unable to access '${datadir}/${actdir}/${tenv}'"
+            return 4
+        fi
+
+        for a in ${act}
+        do
+            if ! checkDir "${datadir}/${actdir}/${tenv}/${a}" Y
+            then
+                echo >&2 "error: unable to access '${datadir}/${actdir}/${tenv}/${a}'"
+                return 5
+            fi
+            if [[ ${silent} -eq 0 ]]
+            then
+                if checkFileRW "${datadir}/${actdir}/${tenv}/${a}/${notifyfile}"
+                then
+                    if ! rm "${datadir}/${actdir}/${tenv}/${a}/${notifyfile}" >& /dev/null
+                    then
+                        echo >&2 "error: unable to delete '${datadir}/${actdir}/${tenv}/${a}/${notifyfile}'"
+                        return 6
+                    fi
+                    didsomething=0
+                fi
+            else
+                if ! checkFileRW "${datadir}/${actdir}/${tenv}/${a}/${notifyfile}" Y
+                then
+                    echo >&2 "error: unable to create '${datadir}/${actdir}/${tenv}/${a}/${notifyfile}'"
+                    return 7
+                fi
+                didsomething=0
+            fi
+            if [[ "${cmd}" == "" ]]
+            then
+                if checkFileRW "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}"
+                then
+                    if ! rm "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}" >& /dev/null
+                    then
+                        echo >&2 "error: unable to delete '${datadir}/${actdir}/${tenv}/${a}/${cmdfile}'"
+                        return 8
+                    fi
+                    didsomething=0
+                fi
+            else
+                if ! checkFileRWX "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}" Y
+                then
+                    echo >&2 "error: unable to create '${datadir}/${actdir}/${tenv}/${a}/${cmdfile}'"
+                    return 9
+                fi
+                echo "$@" > "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}" 2>&1
+                didsomething=0
+            fi
+        done
+    done
+
+    if [[ ${didsomething} -eq 0 ]]
+    then
+        if ! checkFileRW "${datadir}/${tmpdir}/${reffile}" Y
+        then
+            echo >&2 "error: unable to mark refresh as needed"
+            return 10
+        fi
+    fi
+
+    return 0
+}
+
+rotateLogs()
+{
+    local logname="$1"
+    local -i i=9
+    local -i n
+
+    while [[ ${i} -ge ${maxlogs} ]]
+    do
+        rm -f "${logname}".${i} >& /dev/null
+        i=${i}-1
+    done
+    
+    i=${maxlogs}-1
+    n=${i}-1
+    while [[ ${n} -ge 1 ]]
+    do
+        if [[ -f "${logname}".${n} ]]
+        then
+            mv "${logname}".${n} "${logname}".${i} >& /dev/null
+        fi
+        i=${i}-1
+        n=${n}-1
+    done
+    if [[ -f "${logname}" ]]
+    then
+        mv "${logname}" "${logname}".1 >& /dev/null
+    fi
+
+    touch "${logname}" >& /dev/null
+
+    return 0
+}
+
+doLog()
+{
+    local -i action=1
+    local -i faction=1
+    local -i follow=1
+    local -i ffollow=1
+    local -i clear=1
+    local -i fclear=1
+    local -i info=1
+    local -i finfo=1
+    local -i rotate=1
+    local -i frotate=1
+    local llogdir
+    local logfname
+    local logpath
+    local tmp
+
+    while [[ $# -gt 0 ]]
+    do
+        case "$1" in
+            "-action")
+                if [[ ${faction} -eq 0 ]]
+                then
+                    usage
+                fi
+                faction=0
+                action=0
+                ;;
+            "-clear")
+                if [[ ${fclear} -eq 0 ]] || \
+                   [[ ${finfo} -eq 0 ]] || \
+                   [[ ${frotate} -eq 0 ]] || \
+                   [[ ${ffollow} -eq 0 ]]
+                then
+                    usage
+                fi
+                fclear=0
+                clear=0
+                ;;
+            "-follow")
+                if [[ ${fclear} -eq 0 ]] || \
+                   [[ ${finfo} -eq 0 ]] || \
+                   [[ ${frotate} -eq 0 ]] || \
+                   [[ ${ffollow} -eq 0 ]]
+                then
+                    usage
+                fi
+                ffollow=0
+                follow=0
+                ;;
+            "-info")
+                if [[ ${fclear} -eq 0 ]] || \
+                   [[ ${finfo} -eq 0 ]] || \
+                   [[ ${frotate} -eq 0 ]] || \
+                   [[ ${ffollow} -eq 0 ]]
+                then
+                    usage
+                fi
+                finfo=0
+                info=0
+                ;;
+            "-rotate")
+                if [[ ${fclear} -eq 0 ]] || \
+                   [[ ${finfo} -eq 0 ]] || \
+                   [[ ${frotate} -eq 0 ]] || \
+                   [[ ${ffollow} -eq 0 ]]
+                then
+                    usage
+                fi
+                frotate=0
+                rotate=0
+                ;;
+            *)
+                usage
+                ;;
+        esac
+        shift
+    done
+
+    loadConfig Y
+    if [[ $? -gt 1 ]]
+    then
+        return 1
+    fi
+
+    if [[ ${action} -eq 0 ]]
+    then
+        if [[ "${actlog}" == "" ]]
+        then
+            echo >&2 "error: action log is not defined"
+            return 1
+        fi
+        if ! checkFileRW "${actlog}" Y
+        then
+            echo >&2 "error: unable to access '${actlog}'"
+            return 1
+        fi
+        logpath="${actlog}"
+    else
+        logpath="${datadir}/${logdir}/${logfile}"
+    fi
+    llogdir=`dirname "${logpath}"`
+    logfname=`basename "${logpath}"`
+
+    if [[ ${clear} -eq 0 ]]
+    then
+        if ! checkDir "${llogdir}" Y
+        then
+            echo >&2 "error: '${logpath}' is not accessible"
+            return 1
+        else
+            cd "${llogdir}" >& /dev/null
+            rm -f "${logfname}" "${logfname}".[123456789] >& /dev/null
+            touch "${logfname}" >& /dev/null
+        fi
+    elif [[ ${info} -eq 0 ]]
+    then
+        if [[ ${action} -eq 0 ]]
+        then
+            echo "info: action log location is '${llogdir}'"
+        else
+            echo "info: log location is '${llogdir}'"
+        fi
+        cd "${llogdir}" >& /dev/null
+        if [[ $? -ne 0 ]]
+        then
+            echo >&2 "error: '${llogdir}' is not accessible"
+            return 1
+        else
+            tmp=`ls "${logfname}"* 2>/dev/null`
+            if [[ "${tmp}" == "" ]]
+            then
+                echo "info: no log files"
+            else
+                echo "info: log files..."
+                ls -lrt "${logfname}"*
+            fi
+        fi
+    elif [[ ${rotate} -eq 0 ]]
+    then
+        cd "${llogdir}" >& /dev/null
+        if [[ $? -ne 0 ]]
+        then
+            echo >&2 "error: '${llogdir}' is not accessible"
+            return 1
+        else
+            rotateLogs "${logfname}"
+            return $?
+        fi
+    else
+        if ! checkFileR "${logpath}"
+        then
+            echo >&2 "error: log file '${logpath}' not found"
+            return 1
+        fi
+        if [[ ${follow} -eq 0 ]]
+        then
+            tail -f "${logpath}"
+        else
+            cat "${logpath}"
+        fi
+    fi
+
+    return 0
+}
+
+doInit()
+{
+    local res
+    local -i tret=0
+
+    if [[ $# -ne 0 ]]
+    then
+        usage
+    fi
+
+    res=`doStatus 2>&1`
+    tret=$?
+    res=`echo "${res}" | sed -e 's/^[a-z]*: //'`
+    if [[ ${tret} -ne 1 ]]
+    then
+        echo >&2 "error: ${res}"
+        return 2
+    fi
+
+    doUninstall >& /dev/null
+
+    cd "${datadir}/${cfgdir}" 
+    rm -rf * >& /dev/null
+    cd "${datadir}/${actdir}"
+    rm -rf * >& /dev/null
+    cd "${datadir}/${tmpdir}"
+    rm -rf * >& /dev/null
+    cd "${datadir}/${logdir}"
+    rm -rf * >& /dev/null
+
+    init
+
+    return 0
+}
+
+doConfig()
+{
+    local tmp
+    local -i fclear=1
+    local -i facsq=1
+    local -i acsq=0
+    local -i fbtsq=1
+    local -i btsq=0
+    local -i fwarn=1
+    local -i warn=0
+    local -i fkill=1
+    local -i kill=0
+    local -i fnlogs=1
+    local -i nlogs=0
+    local -i fpath=1
+    local path
+    local -i didsomething=1
+    local -i ret=0
+
+    loadConfig Y
+    ret=$?
+    if [[ ${ret} -gt 1 ]]
+    then
+        return 1
+    fi
+
+    if [[ $# -eq 0 ]]
+    then
+        if [[ ! -e "${datadir}/${cfgdir}/${warntimeout}" ]]
+        then
+            tmp=" (default)"
+        else
+            tmp=""
+        fi
+        echo "warning timeout       : ${cmdwarntimeout}${tmp}"
+        if [[ ! -e "${datadir}/${cfgdir}/${killtimeout}" ]]
+        then
+            tmp=" (default)"
+        else
+            tmp=""
+        fi
+        echo "kill timeout          : ${cmdkilltimeout}${tmp}"
+        if [[ ! -e "${datadir}/${cfgdir}/${acsqfile}" ]]
+        then
+            tmp=" (default)"
+        else
+            tmp=""
+        fi
+        echo "AC sleep quantum      : ${acSQ}${tmp}"
+        if [[ ${enablePower} -eq 0 ]]
+        then
+            if [[ ! -e "${datadir}/${cfgdir}/${btsqfile}" ]]
+            then
+                tmp=" (default)"
+            else
+                tmp=""
+            fi
+            echo "battery sleep quantum : ${btSQ}${tmp}"
+        fi
+        if [[ ! -e "${datadir}/${cfgdir}/${numlogfile}" ]]
+        then
+            tmp=" (default)"
+        else
+            tmp=""
+        fi
+        echo "maximum log files     : ${maxlogs}${tmp}"
+        if [[ "${actlog}" == "" ]]
+        then
+            echo "action log            : <not defined>"
+        elif checkFileRW "${actlog}" Y
+        then
+            echo "action log            : ${actlog}"
+        else
+            echo "action log            : INACCESSIBLE (${actlog})"
+        fi
+        return 0
+    fi
+
+    while [[ $# -gt 0 ]]
+    do
+        case "$1" in
+            "-clear")
+                if [[ ${fwarn} -eq 0 ]] || [[ ${fkill} -eq 0 ]] || \
+                   [[ ${facsq} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]] || \
+                   [[ ${fpath} -eq 0 ]] || [[ ${fnlogs} -eq 0 ]]
+                then
+                    usage
+                fi
+                fclear=0
+                ;;
+            "-actionlog")
+                if [[ ${fclear} -eq 0 ]] || [[ ${fpath} -eq 0 ]]
+                then
+                    usage
+                fi
+                fpath=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                path="$1"
+                ;;
+            "-acsq")
+                if [[ ${fclear} -eq 0 ]] || [[ ${facsq} -eq 0 ]]
+                then
+                    usage
+                fi
+                facsq=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: sleep quantum values must be numeric"
+                    return 1
+                fi
+                acsq=$1
+                if [[ ${acsq} -lt ${minSleepQuantum} ]] || [[ ${acsq} -gt ${maxSleepQuantum} ]]
+                then
+                    echo >&2 "error: sleep quantum values must be between ${minSleepQuantum} and ${maxSleepQuantum}"
+                    return 2
+                fi
+                ;;
+            "-btsq")
+                if [[ ${fclear} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]]
+                then
+                    usage
+                fi
+                if [[ ${enablePower} -ne 0 ]]
+                then
+                    echo >&2 "error: this system does not support a battery power source"
+                    return 2
+                fi
+                fbtsq=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: sleep quantum values must be numeric"
+                    return 1
+                fi
+                btsq=$1
+                if [[ ${btsq} -lt ${minSleepQuantum} ]] || [[ ${btsq} -gt ${maxSleepQuantum} ]]
+                then
+                    echo >&2 "error: sleep quantum values must be between ${minSleepQuantum} and ${maxSleepQuantum}"
+                    return 2
+                fi
+                ;;
+            "-warntimeout")
+                if [[ ${fclear} -eq 0 ]] || [[ ${fwarn} -eq 0 ]]
+                then
+                    usage
+                fi
+                fwarn=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: timeout values must be numeric"
+                    return 1
+                fi
+                warn=$1
+                if [[ ${warn} -lt ${minTimeout} ]] || [[ ${warn} -gt ${maxTimeout} ]]
+                then
+                    echo >&2 "error: timeout values must be between ${minTimeout} and ${maxTimeout}"
+                    return 2
+                fi
+                ;;
+            "-killtimeout")
+                if [[ ${fclear} -eq 0 ]] || [[ ${fkill} -eq 0 ]]
+                then
+                    usage
+                fi
+                fkill=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: timeout values must be numeric"
+                    return 1
+                fi
+                kill=$1
+                if [[ ${kill} -lt ${minTimeout} ]] || [[ ${kill} -gt ${maxTimeout} ]]
+                then
+                    echo >&2 "error: timeout values must be between ${minTimeout} and ${maxTimeout}"
+                    return 2
+                fi
+                ;;
+            "-maxlogs")
+                if [[ ${fclear} -eq 0 ]] || [[ ${fnlogs} -eq 0 ]]
+                then
+                    usage
+                fi
+                fnlogs=0
+                shift
+                if [[ $# -eq 0 ]]
+                then
+                    usage
+                fi
+                if ! isNumeric "$1"
+                then
+                    echo >&2 "error: maxlogs value must be numeric"
+                    return 1
+                fi
+                nlogs=$1
+                if [[ ${nlogs} -lt ${minNumLogs} ]] || [[ ${nlogs} -gt ${maxNumLogs} ]]
+                then
+                    echo >&2 "error: maxlogs value must be between ${minNumLogs} and ${maxNumLogs}"
+                    return 2
+                fi
+                ;;
+            *)
+                usage
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ${fclear} -eq 0 ]]
+    then
+        checkFileRW "${datadir}/${cfgdir}/${warntimeout}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${warntimeout}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${warntimeout}" >& /dev/null
+            didsomething=0
+        fi
+        checkFileRW "${datadir}/${cfgdir}/${killtimeout}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${killtimeout}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${killtimeout}" >& /dev/null
+            didsomething=0
+        fi
+        checkFileRW "${datadir}/${cfgdir}/${acsqfile}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${acsqfile}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${acsqfile}" >& /dev/null
+            didsomething=0
+        fi
+        checkFileRW "${datadir}/${cfgdir}/${btsqfile}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${btsqfile}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${btsqfile}" >& /dev/null
+            didsomething=0
+        fi
+        checkFileRW "${datadir}/${cfgdir}/${numlogfile}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${numlogfile}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${numlogfile}" >& /dev/null
+            didsomething=0
+        fi
+        checkFileRW "${datadir}/${cfgdir}/${actionlog}"
+        ret=$?
+        if [[ ${ret} -gt 1 ]]
+        then
+            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${actionlog}'"
+            return 1
+        elif [[ ${ret} -eq 0 ]]
+        then
+            rm -f "${datadir}/${cfgdir}/${actionlog}" >& /dev/null
+            didsomething=0
+        fi
+    else
+        if [[ ${fwarn} -eq 1 ]]
+        then
+            warn=${cmdwarntimeout}
+        fi
+        if [[ ${fkill} -eq 1 ]]
+        then
+            kill=${cmdkilltimeout}
+        fi
+        if [[ ${kill} -gt 0 ]] && [[ ${warn} -ge ${kill} ]]
+        then
+            echo >&2 "error: the warning timeout must be < the kill timeout"
+            return 3
+        fi
+
+        if [[ ${fpath} -eq 0 ]]
+        then
+            if [[ "${path}" == "" ]]
+            then
+                checkFileRW "${datadir}/${cfgdir}/${actionlog}"
+                ret=$?
+                if [[ ${ret} -gt 1 ]]
+                then
+                    echo >&2 "error: unable to access '${datadir}/${cfgdir}/${actionlog}'"
+                    return 4
+                elif [[ ${ret} -eq 0 ]]
+                then
+                    rm -f "${datadir}/${cfgdir}/${actionlog}" >& /dev/null
+                    didsomething=0
+                fi
+            else
+                checkFileRW "${path}" Y
+                ret=$?
+                if [[ ${ret} -gt 1 ]]
+                then
+                    echo >&2 "error: unable to create '${path}'"
+                    return 4
+                fi
+                checkFileRW "${datadir}/${cfgdir}/${actionlog}" Y
+                ret=$?
+                if [[ ${ret} -ne 0 ]]
+                then
+                    echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${actionlog}'"
+                    return 4
+                else
+                    echo "${path}" > "${datadir}/${cfgdir}/${actionlog}" 2> /dev/null
+                    didsomething=0
+                fi
+            fi
+        fi
+    
+        if [[ ${fwarn} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${cfgdir}/${warntimeout}" Y
+            then
+                echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${warntimeout}'"
+                return 5
+            fi
+            echo "${warn}" > "${datadir}/${cfgdir}/${warntimeout}" 2>/dev/null
+            didsomething=0
+        fi
+    
+        if [[ ${fkill} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${cfgdir}/${killtimeout}" Y
+            then
+                echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${killtimeout}'"
+                return 5
+            fi
+            echo "${kill}" > "${datadir}/${cfgdir}/${killtimeout}" 2>/dev/null
+            didsomething=0
+        fi
+    
+        if [[ ${facsq} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${cfgdir}/${acsqfile}" Y
+            then
+                echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${acsqfile}'"
+                return 5
+            fi
+            echo "${acsq}" > "${datadir}/${cfgdir}/${acsqfile}" 2>/dev/null
+            didsomething=0
+        fi
+    
+        if [[ ${fbtsq} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${cfgdir}/${btsqfile}" Y
+            then
+                echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${btsqfile}'"
+                return 5
+            fi
+            echo "${btsq}" > "${datadir}/${cfgdir}/${btsqfile}" 2>/dev/null
+            didsomething=0
+        fi
+    
+        if [[ ${fnlogs} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${cfgdir}/${numlogfile}" Y
+            then
+                echo >&2 "error: unable to write to '${datadir}/${cfgdir}/${numlogfile}'"
+                return 5
+            fi
+            echo "${nlogs}" > "${datadir}/${cfgdir}/${numlogfile}" 2>/dev/null
+            didsomething=0
+        fi
+    fi
+
+    if [[ ${didsomething} -eq 0 ]]
+    then
+        if ! checkFileRW "${datadir}/${tmpdir}/${reffile}" Y
+        then
+            echo >&2 "error: unable to mark refresh"
+            return 5
+        fi
+    fi
+
+    return 0
+}
+
+cleanupInternal()
+{
+    local -i verbose=1
+    local p
+
+    if [[ $# -gt 0 ]] && [[ "$1" == "0" ]]
+    then
+        verbose=0
+    fi
+
+    for p in `ps -f -u ${myuid} | grep "${netwatcher}" | grep -v grep | awk '{ print $2 }'`
+    do
+        if [[ ${verbose} -eq 0 ]]
+        then
+            echo "info: killing netwatcher(${p})"
+        fi
+        kill -TERM ${p}
+    done
+    rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
+
+    for p in `ps -f -u ${myuid} | grep "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup" | grep -v grep | awk '{ print $2 }'`
+    do
+        if [[ ${verbose} -eq 0 ]]
+        then
+            echo "info: killing sleepwatcher(${p})"
+        fi
+        kill -TERM ${p}
+    done
+    rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
+
+    return 0
+}
+
+doCleanup()
+{
+    local -i ret
+    local -i verbose=1
+    local msg
+
+    if [[ $# -gt 1 ]]
+    then
+        usage
+    elif [[ $# -gt 0 ]]
+    then
+        if [[ "$1" == "-verbose" ]]
+        then
+            verbose=0
+        else
+            usage
+        fi
+    fi
+
+    msg=`doStatus 2>&1`
+    ret=$?
+    if [[ ${ret} -eq 0 ]] || \
+       [[ ${ret} -eq 4 ]] || \
+       [[ ${ret} -eq 5 ]] 
+    then
+        msg=`echo "${msg}" | sed -e 's/^[a-z]*: //'`
+        echo >&2 "error: ${msg}"
+        return 1
+    fi
+
+    cleanupInternal ${verbose}
+
+    return 0
+}
+
+doSleep()
+{
+    if ! checkFileRW "${datadir}/${tmpdir}/${sleepfile}" Y
+    then
+        return 1
+    fi
+    date '+%s' >"${datadir}/${tmpdir}/${sleepfile}" 2>/dev/null
+    return 0
+}
+
+doWake()
+{
+    if ! checkFileRW "${datadir}/${tmpdir}/${wakefile}" Y
+    then
+        return 1
+    fi
+    date '+%s' >"${datadir}/${tmpdir}/${wakefile}" 2>/dev/null
+    return 0
+}
+
+doAcPower()
+{
+    if ! checkFileRW "${datadir}/${tmpdir}/${acpowerfile}" Y
+    then
+        return 1
+    fi
+    date '+%s' >"${datadir}/${tmpdir}/${acpowerfile}" 2>/dev/null
+    return 0
+}
+
+doBattery()
+{
+    if ! checkFileRW "${datadir}/${tmpdir}/${batteryfile}" Y
+    then
+        return 1
+    fi
+    date '+%s' >"${datadir}/${tmpdir}/${batteryfile}" 2>/dev/null
+    return 0
+}
+
+doVersion()
+{
+    echo "Version ${version}"
+    echo "${copyright}"
+    return 0
+}
+
+trap "cleanup 120" INT HUP TERM
+me=`basename "$0"`
+myuid=`id -u`
+mypath=`canonPath "$0"`
+checkHasBattery
+
+if [[ $# -lt 1 ]]
+then
+    usage
+fi
+cmd="$1"
+shift
+if [[ "${cmd}" == "help" ]]
+then
+    usage Y
+fi
+
+umask 022
+init
+
+case "${cmd}" in
+    "version")
+        doVersion "$@"
+        ret=$?
+        ;;
+    "list")
+        doList "$@"
+        ret=$?
+        ;;
+    "set")
+        doSet "$@"
+        ret=$?
+        ;;
+    "clear")
+        doClear "$@"
+        ret=$?
+        ;;
+    "status")
+        doStatus "$@"
+        ret=$?
+        ;;
+    "start")
+        doStart "$@"
+        ret=$?
+        ;;
+    "stop")
+        doStop "$@"
+        ret=$?
+        ;;
+    "log")
+        doLog "$@"
+        ret=$?
+        ;;
+    "refresh")
+        doRefresh "$@"
+        ret=$?
+        ;;
+    "monitor")
+        doMonitor "$@"
+        ret=$?
+        ;;
+    "install")
+        doInstall "$@"
+        ret=$?
+        ;;
+    "uninstall")
+        doUninstall "$@"
+        ret=$?
+        ;;
+    "init")
+        doInit "$@"
+        ret=$?
+        ;;
+    "config")
+        doConfig "$@"
+        ret=$?
+        ;;
+    "cleanup")
+        doCleanup "$@"
+        ret=$?
+        ;;
+    "_zzinternal")
+        doInternal "$@"
+        ret=$?
+        ;;
+    "_zzsleep")
+        doSleep "$@"
+        ret=$?
+        ;;
+    "_zzwake")
+        doWake "$@"
+        ret=$?
+        ;;
+    "_zzacpower")
+        doAcPower "$@"
+        ret=$?
+        ;;
+    "_zzbattery")
+        doBattery "$@"
+        ret=$?
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+cleanup ${ret}
