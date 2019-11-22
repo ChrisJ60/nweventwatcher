@@ -1,0 +1,54 @@
+#!/bin/bash
+
+#
+# Network Event Watcher. Copyright (c) Chris Jenkins 2019
+#
+# Licensed under the Universal Permissive License v 1.0 as shown
+# at http://oss.oracle.com/licenses/upl
+#
+
+export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+
+declare -i retval=0
+
+usage()
+{
+    echo
+    echo "usage:  getwifinetworks"
+    echo
+    echo "Displays the names (SSIDs) of the connected WiFi networks, if any."
+    echo
+    echo "Exits with a zero exit status if a WiFi network is connected"
+    echo "or 1 otherwise."
+    echo
+    exit 100
+}
+
+getWiFiNW()
+{
+    local interfacename=""
+    local nwname=""
+    local -i ret=1
+
+    for interfacename in `getnwinterfaces wifi -active`
+    do
+        nwname=`networksetup -getairportnetwork "${interfacename}" 2>/dev/null | grep '^Current Wi-Fi Network:' | sed -e 's/^Current Wi-Fi Network: //'`
+        if [[ "${nwname}" != "" ]]
+        then
+            echo "${nwname}"
+            ret=0
+        fi
+    done
+
+    return ${ret}
+}
+
+if [[ $# -ne 0 ]]
+then
+    usage
+fi
+
+getWiFiNW
+retval=$?
+
+exit ${retval}

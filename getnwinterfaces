@@ -1,0 +1,272 @@
+#!/bin/bash
+
+#
+# Network Event Watcher. Copyright (c) Chris Jenkins 2019
+#
+# Licensed under the Universal Permissive License v 1.0 as shown
+# at http://oss.oracle.com/licenses/upl
+#
+
+export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+
+declare -ri mininterface=0
+declare -ri maxinterface=20
+
+declare -i activeOnly=1
+declare -i retval=1
+
+usage()
+{
+    echo
+    echo "usage:  getnwinterfaces { wifi | wired | vpn | other | all } -active"
+    echo
+    echo "Displays the name of the machine's network interfaces of a given"
+    echo "type (WiFi, Wired, VPN, Other or all). Optionally limit the list to only"
+    echo "those that are active."
+    echo
+    echo "Exits with a zero exit status if at least one interface was found"
+    echo "or >0 otherwise."
+    echo
+    exit 100
+}
+
+isActive()
+{
+    declare -i ret=1
+    declare ifname="$1"
+
+    ifconfig "${ifname}" 2>/dev/null | grep -q 'status: active'
+    ret=$?
+    if [ \( ${ret} -ne 0 \) -a \
+         \( \( "${ifname:0:4}" == "utun" \) -o \
+             \( "${ifname:0:3}" == "ppp" \) -o \
+             \( "${ifname:0:5}" == "ipsec" \) \) ]
+    then
+        ifconfig "${ifname}" 2>/dev/null | grep -q '	inet '
+        ret=$?
+    fi
+
+    return ${ret}
+}
+
+getWiFiInterfaces()
+{
+    local interfacebase="en"
+    local interfacename=""
+    local -i interfacenumber=${mininterface}
+    local -i ret=1
+
+    while [[ ${interfacenumber} -le ${maxinterface} ]]
+    do
+        interfacename="${interfacebase}${interfacenumber}"
+        networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
+        if [[ $? -eq 0 ]]
+        then
+            if [[ ${activeOnly} -eq 1 ]]
+            then
+                echo "${interfacename}"
+                ret=0
+            elif isActive "${interfacename}"
+            then
+                echo "${interfacename}"
+                ret=0
+            fi
+        fi
+        interfacenumber=${interfacenumber}+1
+    done
+
+    return ${ret}
+}
+
+getOtherInterfaces()
+{
+    local interfacebase="en"
+    local interfacename=""
+    local -i interfacenumber=${mininterface}
+    local -i ret=1
+
+    while [[ ${interfacenumber} -le ${maxinterface} ]]
+    do
+        interfacename="${interfacebase}${interfacenumber}"
+        ifconfig "${interfacename}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
+            if [[ $? -ne 0 ]]
+            then
+                networksetup -listnetworkserviceorder | grep '(Hardware ' | grep -ve 'Ethernet' -e 'LAN' -e 'Wi-Fi' -e 'L2TP' -e 'PPTP' | grep -qe "${interfacename})"
+                if [[ $? -eq 0 ]]
+                then
+                    if [[ ${activeOnly} -eq 1 ]]
+                    then
+                        echo "${interfacename}"
+                        ret=0
+                    elif isActive "${interfacename}"
+                    then
+                        echo "${interfacename}"
+                        ret=0
+                    fi
+                fi
+            fi
+        fi
+        interfacenumber=${interfacenumber}+1
+    done
+
+    return ${ret}
+}
+
+getWiredInterfaces()
+{
+    local interfacebase="en"
+    local interfacename=""
+    local -i interfacenumber=${mininterface}
+    local -i ret=1
+
+    while [[ ${interfacenumber} -le ${maxinterface} ]]
+    do
+        interfacename="${interfacebase}${interfacenumber}"
+        ifconfig "${interfacename}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
+            if [[ $? -ne 0 ]]
+            then
+                networksetup -listnetworkserviceorder | grep -e 'Ethernet' -e 'LAN' | grep -qe "${interfacename})"
+                if [[ $? -eq 0 ]]
+                then
+                    if [[ ${activeOnly} -eq 1 ]]
+                    then
+                            echo "${interfacename}"
+                            ret=0
+                    elif isActive "${interfacename}"
+                    then
+                        echo "${interfacename}"
+                        ret=0
+                    fi
+                fi
+            fi
+        fi
+        interfacenumber=${interfacenumber}+1
+    done
+
+    return ${ret}
+}
+
+getVpnInterfaces()
+{
+    local interfacebase1="utun"
+    local interfacebase2="ppp"
+    local interfacebase3="ipsec"
+    local interfacename=""
+    local -i interfacenumber=${mininterface}
+    local -i ret=1
+
+    while [[ ${interfacenumber} -le ${maxinterface} ]]
+    do
+        interfacename="${interfacebase1}${interfacenumber}"
+        ifconfig "${interfacename}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            if [[ ${activeOnly} -eq 1 ]]
+            then
+                echo "${interfacename}"
+                ret=0
+            elif isActive "${interfacename}"
+            then
+                echo "${interfacename}"
+                ret=0
+            fi
+        fi
+        interfacename="${interfacebase2}${interfacenumber}"
+        ifconfig "${interfacename}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            if [[ ${activeOnly} -eq 1 ]]
+            then
+                echo "${interfacename}"
+                ret=0
+            elif isActive "${interfacename}"
+            then
+                echo "${interfacename}"
+                ret=0
+            fi
+        fi
+        interfacename="${interfacebase3}${interfacenumber}"
+        ifconfig "${interfacename}" >& /dev/null
+        if [[ $? -eq 0 ]]
+        then
+            if [[ ${activeOnly} -eq 1 ]]
+            then
+                echo "${interfacename}"
+                ret=0
+            elif isActive "${interfacename}"
+            then
+                echo "${interfacename}"
+                ret=0
+            fi
+        fi
+        interfacenumber=${interfacenumber}+1
+    done
+
+    return ${ret}
+}
+
+if [[ $# -lt 1 ]] || [[ $# -gt 2 ]]
+then
+    usage
+fi
+if [[ $# -gt 1 ]]
+then
+    if [[ "$2" == "-active" ]]
+    then
+        activeOnly=0
+    else
+        usage
+    fi
+fi
+
+case "$1" in
+    wifi)
+        getWiFiInterfaces
+        retval=$?
+        ;;
+    wired)
+        getWiredInterfaces
+        retval=$?
+        ;;
+    other)
+        getOtherInterfaces
+        retval=$?
+        ;;
+    vpn)
+        getVpnInterfaces
+        retval=$?
+        ;;
+    all)
+        getWiFiInterfaces
+        if [ $? -eq 0 ]
+        then
+            retval=0
+        fi
+        getWiredInterfaces
+        if [ $? -eq 0 ]
+        then
+            retval=0
+        fi
+        getVpnInterfaces
+        if [ $? -eq 0 ]
+        then
+            retval=0
+        fi
+        getOtherInterfaces
+        if [ $? -eq 0 ]
+        then
+            retval=0
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+exit ${retval}
