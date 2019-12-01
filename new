@@ -7,7 +7,7 @@
 # at http://oss.oracle.com/licenses/upl
 #
 
-declare -r version="2.7.6"
+declare -r version="2.7.7"
 declare -r copyright="Copyright (c) Chris Jenkins 2019"
 
 export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
@@ -1395,6 +1395,8 @@ checkWake()
             if [[ ${delta} -lt ${minsleepsecs} ]]
             then
                 logMsg "bogus sleep/wake ${sTS}/${wTS} - ignoring"
+                rm -f "${datadir}/${tmpdir}/${sleepfile}" >& /dev/null
+                rm -f "${datadir}/${tmpdir}/${wakefile}" >& /dev/null
             else
                 wake=0
                 inSleep=1
@@ -5221,6 +5223,8 @@ cleanupInternal()
         kill -TERM ${p}
     done
     rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
+    rm -f "${datadir}/${tmpdir}/${sleepfile}" >& /dev/null
+    rm -f "${datadir}/${tmpdir}/${wakefile}" >& /dev/null
 
     for p in `ps -f -u ${myuid} | grep "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup" | grep -v grep | awk '{ print $2 }'`
     do
@@ -5231,6 +5235,7 @@ cleanupInternal()
         kill -TERM ${p}
     done
     rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
+    rm -f "${datadir}/${tmpdir}/${nwchangefile}" >& /dev/null
 
     return 0
 }
