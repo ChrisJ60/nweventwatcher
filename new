@@ -21,7 +21,7 @@ eval "$(/usr/libexec/path_helper)"
 
 ############################################################
 # Constants
-readonly version="2.8.4"
+readonly version="2.8.5"
 readonly copyright="Copyright (c) Chris Jenkins 2019, 2020"
 
 readonly ladir=~/Library/LaunchAgents
