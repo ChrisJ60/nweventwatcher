@@ -267,7 +267,7 @@ as action commands, bear in mind the following:
 
   new uninstall
 
-  new status [-verbose]
+  new status [-verbose] [-asleep]
 
   new start
 
@@ -424,10 +424,23 @@ Uninstalls the user LaunchAgent so that the monitor no longer runs
 automatically. The agent must not be loaded in order to use this
 command.
 
-**status [-verbose]**
+**status [-verbose] [-asleep]**
 
 Displays the status of the monitor/agent. If '-verbose' is specified then
 status is also displayed for sleepwatcher, netwatcher and pending refresh.
+
+If '-asleep' is specified then sets the exit code as follows:
+
+0   -  An agent or monitor is running, sleepwatcher is running and the
+      system is currently asleep (i.e. in a 'dark wake').
+
+1   -  An agent or monitor is running, sleepwatcher is running and the
+      system is not currently asleep.
+
+\>1 -  Any of the above conditions are not met, an error occurred, etc.
+
+Normally using '-asleep' does not generate any output messages but you
+can get some informative messages by also specifying '-verbose'
 
 **start**
 

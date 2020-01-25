@@ -1,6 +1,6 @@
 ## nweventwatcher
 
-A macOS utility that watches for changes to the system's network environment and executes user defined commands based on the changes. It can also detect and react to wake-from-sleep events and changs between battery and AC power.
+A macOS utility that watches for changes to the system's network environment and executes user defined commands based on the changes. It can also detect and react to wake-from-sleep events and changes between battery and AC power.
 
 Tested on macOS Mojave and Catalina. May work on earlier versions.
 
