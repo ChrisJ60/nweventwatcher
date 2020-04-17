@@ -1,52 +1,68 @@
-#!/bin/bash
+#!/bin/zsh
 
 #
-# Copyright (c) Chris Jenkins 2019
+# Copyright (c) Chris Jenkins 2019, 2020
 #
 # Licensed under the Universal Permissive License v 1.0 as shown
 # at http://oss.oracle.com/licenses/upl
 #
 
-export PATH=:/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+############################################################
+# reset all shell options to default
+emulate -LR zsh
+# set required options
+setopt nullglob
+setopt shwordsplit
+setopt ksharrays
 
-declare -r ipurlv4="https://ipv4.thejenkinsfamily.org.uk/utils/getmyip.php"
-declare -r ipurlv6="https://ipv6.thejenkinsfamily.org.uk/utils/getmyip.php"
-declare -r interfacebase="en"
-declare -r interfacebasev="vlan"
-declare -ir mininterface=0
-declare -ir maxinterface=20
-declare -ir minutun=0
-declare -ir maxutun=9
-declare -ir minipsec=0
-declare -ir maxipsec=9
-declare -ir iftype_wifi=0
-declare -ir iftype_wired=1
-declare -ir iftype_vpn=2
+############################################################
+# reset PATH to system default
+eval "$(/usr/libexec/path_helper)"
 
-declare -i iftype
-declare -i numif=0
-declare -a ifname
-declare -i ipv4=1
-declare -i ipv6=1
-#declare -i ipv6t=1
-declare -i singleAddr=1
-declare -i tempAddrOnly=1
-declare -i privAddrOnly=1
-declare -i globAddrOnly=1
-declare -i n
-declare -i ret
-declare -i tret
+readonly ipurl2v4="https://ipv4.thejenkinsfamily.org.uk/utils/getmyip.php"
+readonly ipurl2v6="https://ipv6.thejenkinsfamily.org.uk/utils/getmyip.php"
+readonly ipurl3v4="http://v4.ipv6-test.com/api/myip.php"
+readonly ipurl3v6="http://v6.ipv6-test.com/api/myip.php"
+readonly interfacebase="en"
+readonly interfacebaset="bridge"
+readonly interfacebasev="vlan"
+readonly -i mininterface=0
+readonly -i maxinterface=20
+readonly -i minutun=0
+readonly -i maxutun=9
+readonly -i minipsec=0
+readonly -i maxipsec=9
+readonly -i iftype_wifi=0
+readonly -i iftype_wired=1
+readonly -i iftype_tb=2
+readonly -i iftype_vpn=3
+
+declare -a ifname=( "" )
+integer iftype
+integer numif=0
+integer ipv4=1
+integer ipv6=1
+integer singleAddr=1
+integer tempAddrOnly=1
+integer privAddrOnly=1
+integer globAddrOnly=1
+integer n
+integer ret
+integer tret
 
 usage()
 {
     echo 
-    echo "usage:  getmyip {wired | wifi | vpn} {-4 | -6 [-t] [{-p | -g}]} [-s]" 
-    echo "        getmyip public {-4 | -6}" 
+    echo "Usage:"
+    echo 
+    echo "    getmyip {wired | wifi | tb | vpn} {-4 | -6 [-t] [{-p | -g}]} [-s]" 
+    echo "    getmyip public {-4 | -6}" 
     echo 
     echo "Determine and display the system's IP adresses of the specified type."
     echo 
     echo "  wired   - Wired ethernet adapter addresses"
     echo "  wifi    - WiFi adapter addresses"
+    echo "  tb      - Thunderbolt bridge adapter addresses"
     echo "  vpn     - VPN adapter addresses"
     echo "  public  - Public address"
     echo 
@@ -63,10 +79,10 @@ usage()
     echo "  0     -  at least one address was displayed"
     echo "  1     -  no addresses of the specified kind were detected"
     echo "  2     -  no connections of the specified type are active"
-    echo "  10    -  syntax error, help information was displayed"
+    echo "  100   -  syntax error, help information was displayed"
     echo "  other - some other error occurred"
     echo 
-    exit 10
+    exit 100
 }
 
 findVPNInterface()
@@ -78,8 +94,7 @@ findVPNInterface()
     local -i ret=2
 
 # First try PPTP/L2TP
-    ifconfig ppp0 >/dev/null 2>&1
-    if [[ $? -eq 0 ]]
+    if ifconfig ppp0 >&/dev/null
     then
         ifname=ppp0
         ret=0
@@ -88,8 +103,8 @@ findVPNInterface()
         i=${minutun}
         while [[ ${i} -le ${maxutun} ]]
         do
-            v4addr=`getIPv4Address "utun${i}"`
-            v6addr=`getIPv6Address "utun${i}"`
+            v4addr=$(getIPv4Address "utun${i}")
+            v6addr=$(getIPv6Address "utun${i}")
             if [[ "${v4addr}" != "" ]] || [[ "${v6addr}" != "" ]]
             then
                ifname="utun${i}"
@@ -104,8 +119,8 @@ findVPNInterface()
             i=${minipsec}
             while [[ ${i} -le ${maxipsec} ]]
             do
-                v4addr=`getIPv4Address "ipsec${i}"`
-                v6addr=`getIPv6Address "ipsec${i}"`
+                v4addr=$(getIPv4Address "ipsec${i}")
+                v6addr=$(getIPv6Address "ipsec${i}")
                 if [[ "${v4addr}" != "" ]] || [[ "${v6addr}" != "" ]]
                 then
                    ifname="ipsec${i}"
@@ -123,6 +138,7 @@ findVPNInterface()
 
 findInterfaces()
 {
+    local ifbase="${interfacebase}"
     local interfacename=""
     local tmp
     local -i iftype
@@ -137,8 +153,7 @@ findInterfaces()
 
     if [[ ${iftype} -eq ${iftype_vpn} ]]
     then
-        tmp=`findVPNInterface`
-        if [[ $? -eq 0 ]]
+        if tmp=$(findVPNInterface)
         then
             ifname[0]="${tmp}"
             numif=1
@@ -147,28 +162,44 @@ findInterfaces()
             return 2
         fi
     fi
+    if [[ ${iftype} -eq ${iftype_tb} ]]
+    then
+        ifbase="${interfacebaset}"
+    fi
 
 # first check physical interfaces
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
-        interfacename="${interfacebase}${interfacenumber}"
+        interfacename="${ifbase}${interfacenumber}"
         if [[ ${iftype} -eq ${iftype_wifi} ]]
         then
-            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
-            if [[ $? -eq 0 ]]
+            if networksetup -getairportpower "${interfacename}" >&/dev/null
             then
-                ifname[${numif}]="${interfacename}"
-                numif=${numif}+1
-                ret=0
+                if ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
+                then
+                    ifname[${numif}]="${interfacename}"
+                    numif=${numif}+1
+                    ret=0
+                fi
             fi
         fi
         if [[ ${iftype} -eq ${iftype_wired} ]]
         then
-            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
-            if [[ $? -ne 0 ]]
+            if ! networksetup -getairportpower "${interfacename}" >&/dev/null
             then
-                ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
-                if [[ $? -eq 0 ]]
+                if ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
+                then
+                    ifname[${numif}]="${interfacename}"
+                    numif=${numif}+1
+                    ret=0
+                fi
+            fi
+        fi
+        if [[ ${iftype} -eq ${iftype_tb} ]]
+        then
+            if ! networksetup -getairportpower "${interfacename}" >&/dev/null
+            then
+                if ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
                 then
                     ifname[${numif}]="${interfacename}"
                     numif=${numif}+1
@@ -184,8 +215,7 @@ findInterfaces()
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
         interfacename="${interfacebasev}${interfacenumber}"
-        ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" 2>/dev/null | grep -q "status: active"
         then
             ifname[${numif}]="${interfacename}"
             numif=${numif}+1
@@ -202,7 +232,8 @@ getPublicIP()
     local flag=""
     local ip=""
     local ipfile
-    local ipurl
+    local ipurl2
+    local ipurl3
     local -i tmp1
     local -i tmp2
     local -i ret=0
@@ -214,32 +245,39 @@ getPublicIP()
     case "$1" in
         -4)
             flag="4"
-            ipurl="${ipurlv4}"
+            ipurl2="${ipurl2v4}"
+            ipurl3="${ipurl3v4}"
             ;;
         -6)
             flag="6"
-            ipurl="${ipurlv6}"
+            ipurl2="${ipurl2v6}"
+            ipurl3="${ipurl3v6}"
             ;;
         *)
             usage
             ;;
     esac
-    ipfile=`mktemp /tmp/ip.XXXXX 2>/dev/null`
-    if [[ "${ipfile}" == "" ]]
+    if ! ipfile=$(mktemp -q /tmp/ip.XXXXX)
     then
         ret=3
     else
-        curl -s${flag} --connect-timeout 5 --max-time 10 "${ipurl}" >"${ipfile}" 2>/dev/null
+        curl -s${flag} --connect-timeout 5 --max-time 10 "${ipurl2}" >"${ipfile}" 2>/dev/null
         tmp1=$?
-        tmp2=`wc -l "${ipfile}" | sed -e 's/^ *//' -e 's? /tmp.*??'`
+        tmp2=$(wc -l "${ipfile}" | sed -e 's/^ *//' -e 's? /tmp.*??')
+        if [[ ${tmp1} -ne 0 ]] || [[ ${tmp2} -gt 1 ]]
+        then
+            curl -s${flag} --connect-timeout 5 --max-time 10 "${ipurl3}" >"${ipfile}" 2>/dev/null
+            tmp1=$?
+            tmp2=$(wc -l "${ipfile}" | sed -e 's/^ *//' -e 's? /tmp.*??')
+        fi
         if [[ ${tmp1} -eq 0 ]] && [[ ${tmp2} -le 1 ]]
         then
-            ip=`cat "${ipfile}" 2>/dev/null`
+            ip=$(cat "${ipfile}")
             echo "${ip}"
         else
             ret=1
         fi
-        rm -f "${ipfile}" >/dev/null 2>&1
+        rm -f "${ipfile}" >&/dev/null
     fi
 
     return ${ret}
@@ -252,7 +290,7 @@ getIPv4Address()
 
     if [[ "$1" != "" ]]
     then
-        for addr in `ifconfig "$1" 2>/dev/null | grep "inet " | sed -e 's/.*inet //' -e 's/ netmask.*$//' -e 's/ --> .*//'`
+        for addr in $(ifconfig "$1" 2>/dev/null | grep "inet " | sed -e 's/.*inet //' -e 's/ netmask.*$//' -e 's/ --> .*//')
         do
             if [[ "${addr}" != "" ]]
             then
@@ -292,7 +330,7 @@ getIPv6Address()
         gflaga="-v"
     fi
 
-    for addr in `ifconfig "$1" 2>/dev/null | grep "inet6 " | grep -v " scopeid " | grep ${gflagt} "temporary" | sed -e 's/.*inet6 //' -e 's/ prefixlen.*$//' | grep ${gflaga} "${gpata}"`
+    for addr in $(ifconfig "$1" 2>/dev/null | grep "inet6 " | grep -v " scopeid " | grep ${gflagt} "temporary" | sed -e 's/.*inet6 //' -e 's/ prefixlen.*$//' | grep ${gflaga} "${gpata}")
     do
         if [[ "${addr}" != "" ]]
         then
@@ -372,10 +410,10 @@ parseArgs()
         usage
     fi
 
-    if [ \( \( ${privAddrOnly} -eq 0 \) -o \
-            \( ${globAddrOnly} -eq 0 \) -o \
-            \( ${tempAddrOnly} -eq 0 \) \) -a \
-         \( ${ipv6} -eq 1 \) ]
+    if [[ ( ${privAddrOnly} -eq 0 ) || \
+          ( ${globAddrOnly} -eq 0 ) || \
+          ( ${tempAddrOnly} -eq 0 ) ]] && \
+       [[ ${ipv6} -eq 1 ]]
     then
         usage
     fi
@@ -392,6 +430,10 @@ case "$1" in
 
     -vpn|vpn)
         iftype=${iftype_vpn}
+        ;;
+
+    -tb|tb)
+        iftype=${iftype_tb}
         ;;
 
     -wired|wired)

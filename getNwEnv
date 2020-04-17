@@ -1,34 +1,44 @@
-#!/bin/bash
+#!/bin/zsh
 
 #
-# Copyright (c) Chris Jenkins 2019
+# Copyright (c) Chris Jenkins 2019, 2020
 #
 # Licensed under the Universal Permissive License v 1.0 as shown
 # at http://oss.oracle.com/licenses/upl
 #
 
-export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+############################################################
+# reset all shell options to default
+emulate -LR zsh
+# set required options
+setopt nullglob
+setopt shwordsplit
+setopt ksharrays
+
+############################################################
+# reset PATH to system default
+eval "$(/usr/libexec/path_helper)"
 
 #
 # Some constants
 #
 
-declare -r tmpTemplate="/tmp/gne.XXXXXX"
-declare -r stNone="N"
-declare -r stEthernet="E"
-declare -r stWiFi="W"
-declare -r stUSB="U"
-declare -r stBluetooth="B"
-declare -r stVPN="V"
+readonly tmpTemplate="/tmp/gne.XXXXXX"
+readonly stNone="N"
+readonly stEthernet="E"
+readonly stWiFi="W"
+readonly stUSB="U"
+readonly stBluetooth="B"
+readonly stVPN="V"
 
 #
 # The supported environments
 #
 
-declare -ri numEnvs=13
-declare -a envName
-declare -a envStype
-declare -a envDesc
+readonly integer numEnvs=13
+declare -a envName=( "" )
+declare -a envSrvType=( "" )
+declare -a envDesc=( "" )
 
 
 #
@@ -89,10 +99,10 @@ envSrvType[12]=${stVPN}
 # macOS network service info
 #
 
-declare -ri numMatchEntries=9
-declare -a matchString
-declare -a matchType
-declare -a matchIface
+readonly integer numMatchEntries=9
+declare -a matchString=( "" )
+declare -a matchType=( "" )
+declare -a matchIface=( "" )
 matchString[0]="Ethernet"
 matchType[0]="${stEthernet}"
 matchIface[0]=""
@@ -122,45 +132,45 @@ matchType[8]="${stVPN}"
 matchIface[8]="ipsec0"
 
 # Service data for Cisco AnyConnect VPN / OpenConnect VPN
-declare -r pathAnyConnect="/Applications/Cisco/Cisco AnyConnect Secure Mobility Client.app"
-declare -r pathOpenConnect="/Applications/OpenConnect VPN.app"
-declare -r infoAnyConnect="(1) AnyConnect VPN
+readonly pathAnyConnect="/Applications/Cisco/Cisco AnyConnect Secure Mobility Client.app"
+readonly pathOpenConnect="/Applications/OpenConnect VPN.app"
+readonly infoAnyConnect="(1) AnyConnect VPN
 (Hardware Port: Cisco VPN, Device: utun0)"
 
 # Service data for Nord VPN
-declare -r pathNordVPN="/Applications/NordVPN.app"
-declare -r infoNordVPN="(1) Nord VPN
+readonly pathNordVPN="/Applications/NordVPN.app"
+readonly infoNordVPN="(1) Nord VPN
 (Hardware Port: Nord VPN, Device: utun0)"
 
 # Service data for Nord VPN IKE
-declare -r pathNordVPNIKE="/Applications/NordVPN IKE.app"
-declare -r infoNordVPNIKE="(1) Nord VPN IKE
+readonly pathNordVPNIKE="/Applications/NordVPN IKE.app"
+readonly infoNordVPNIKE="(1) Nord VPN IKE
 (Hardware Port: Nord VPN IKE, Device: ipsec0)"
 
 # Service data for Shimo VPN using OpenVPN
-declare -r pathShimo="/Applications/Shimo.app"
-declare -r infoShimo="(1) Shimo VPN
+readonly pathShimo="/Applications/Shimo.app"
+readonly infoShimo="(1) Shimo VPN
 (Hardware Port: OpenVPN, Device: utun0)"
 
-declare -r localv6pfx="fd00::"
+readonly localv6pfx="fd00::"
 
-declare -ir minService=1
-declare -ir maxService=9
-declare -i numServices=0
-declare -a srvType
-declare -a srvName
-declare -a srvIface
-declare -ai srvActive
-declare -i vpnConfigured=1
+readonly integer minService=1
+readonly integer maxService=9
+integer numServices=0
+declare -a srvType=( "" )
+declare -a srvName=( "" )
+declare -a srvIface=( "" )
+declare -a srvActive=( 0 )
+integer vpnConfigured=1
 
 #
 # IP matching environments
 #
 
-declare -a getIPcmd
-declare -a ipCheckPrefix
-declare -ai ipEnvInd
-declare -ri numIpItems=7
+declare -a getIPcmd=( "" )
+declare -a ipCheckPrefix=( "" )
+declare -a ipEnvInd=( 0 )
+readonly integer numIpItems=7
 
 #
 # IP Prefixes (v4 or v6)

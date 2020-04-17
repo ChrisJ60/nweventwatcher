@@ -1,22 +1,35 @@
-#!/bin/bash
+#!/bin/zsh
 
 #
-# Copyright (c) Chris Jenkins 2019
+# Copyright (c) Chris Jenkins 2019, 2020
 #
 # Licensed under the Universal Permissive License v 1.0 as shown
 # at http://oss.oracle.com/licenses/upl
 #
 
-export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+############################################################
+# reset all shell options to default
+emulate -LR zsh
+# set required options
+setopt nullglob
+setopt shwordsplit
+setopt ksharrays
 
-declare -i retval=0
+############################################################
+# reset PATH to system default
+eval "$(/usr/libexec/path_helper)"
+
+integer retval=0
 
 usage()
 {
     echo
-    echo "usage:  getwifinetworks"
+    echo "Usage:"
     echo
-    echo "Displays the names (SSIDs) of the connected WiFi networks, if any."
+    echo "    getwifinetworks"
+    echo
+    echo "Displays the name(s) (SSIDs) of the connected WiFi network(s),"
+    echo "if any."
     echo
     echo "Exits with a zero exit status if a WiFi network is connected"
     echo "or 1 otherwise."
@@ -30,9 +43,9 @@ getWiFiNW()
     local nwname=""
     local -i ret=1
 
-    for interfacename in `getnwinterfaces wifi -active`
+    for interfacename in $(getnwinterfaces wifi -active)
     do
-        nwname=`networksetup -getairportnetwork "${interfacename}" 2>/dev/null | grep '^Current Wi-Fi Network:' | sed -e 's/^Current Wi-Fi Network: //'`
+        nwname=$(networksetup -getairportnetwork "${interfacename}" 2>/dev/null | grep '^Current Wi-Fi Network:' | sed -e 's/^Current Wi-Fi Network: //')
         if [[ "${nwname}" != "" ]]
         then
             echo "${nwname}"

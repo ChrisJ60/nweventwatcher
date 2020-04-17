@@ -1,28 +1,40 @@
-#!/bin/bash
+#!/bin/zsh
 
 #
-# Copyright (c) Chris Jenkins 2019
+# Copyright (c) Chris Jenkins 2019, 2020
 #
 # Licensed under the Universal Permissive License v 1.0 as shown
 # at http://oss.oracle.com/licenses/upl
 #
 
-export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+############################################################
+# reset all shell options to default
+emulate -LR zsh
+# set required options
+setopt nullglob
+setopt shwordsplit
+setopt ksharrays
 
-declare -ri mininterface=0
-declare -ri maxinterface=20
+############################################################
+# reset PATH to system default
+eval "$(/usr/libexec/path_helper)"
 
-declare -i activeOnly=1
-declare -i retval=1
+readonly -i mininterface=0
+readonly -i maxinterface=20
+
+integer activeOnly=1
+integer retval=1
 
 usage()
 {
     echo
-    echo "usage:  getnwinterfaces { wifi | wired | vpn | other | all } -active"
+    echo "Usage:"
+    echo
+    echo "    getnwinterfaces { wifi | wired | tb | vpn | other | all } -active"
     echo
     echo "Displays the name of the machine's network interfaces of a given"
-    echo "type (WiFi, Wired, VPN, Other or all). Optionally limit the list to only"
-    echo "those that are active."
+    echo "type (WiFi, Wired, Thunderbolt,  VPN, Other or all). Optionally"
+    echo "limit the list to only those that are active."
     echo
     echo "Exits with a zero exit status if at least one interface was found"
     echo "or >0 otherwise."
@@ -37,10 +49,10 @@ isActive()
 
     ifconfig "${ifname}" 2>/dev/null | grep -q 'status: active'
     ret=$?
-    if [ \( ${ret} -ne 0 \) -a \
-         \( \( "${ifname:0:4}" == "utun" \) -o \
-             \( "${ifname:0:3}" == "ppp" \) -o \
-             \( "${ifname:0:5}" == "ipsec" \) \) ]
+    if [[ ${ret} -ne 0 ]] && \
+       [[ ( "${ifname:0:4}" == "utun" ) || \
+          ( "${ifname:0:3}" == "ppp" ) || \
+          ( "${ifname:0:5}" == "ipsec" ) ]]
     then
         ifconfig "${ifname}" 2>/dev/null | grep -q '	inet '
         ret=$?
@@ -59,8 +71,7 @@ getWiFiInterfaces()
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
         interfacename="${interfacebase}${interfacenumber}"
-        networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
-        if [[ $? -eq 0 ]]
+        if networksetup -getairportpower "${interfacename}" >&/dev/null
         then
             if [[ ${activeOnly} -eq 1 ]]
             then
@@ -88,14 +99,11 @@ getOtherInterfaces()
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
         interfacename="${interfacebase}${interfacenumber}"
-        ifconfig "${interfacename}" >& /dev/null
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" >& /dev/null
         then
-            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
-            if [[ $? -ne 0 ]]
+            if ! networksetup -getairportpower "${interfacename}" >&/dev/null
             then
-                networksetup -listnetworkserviceorder | grep '(Hardware ' | grep -ve 'Ethernet' -e 'LAN' -e 'Wi-Fi' -e 'L2TP' -e 'PPTP' | grep -qe "${interfacename})"
-                if [[ $? -eq 0 ]]
+                if networksetup -listnetworkserviceorder | grep '(Hardware ' | grep -ve 'Ethernet' -e 'LAN' -e 'Wi-Fi' -e 'L2TP' -e 'PPTP' | grep -qe "${interfacename})"
                 then
                     if [[ ${activeOnly} -eq 1 ]]
                     then
@@ -125,14 +133,45 @@ getWiredInterfaces()
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
         interfacename="${interfacebase}${interfacenumber}"
-        ifconfig "${interfacename}" >& /dev/null
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" >& /dev/null
         then
-            networksetup -getairportpower "${interfacename}" >/dev/null 2>&1
-            if [[ $? -ne 0 ]]
+            if ! networksetup -getairportpower "${interfacename}" >&/dev/null
             then
-                networksetup -listnetworkserviceorder | grep -e 'Ethernet' -e 'LAN' | grep -qe "${interfacename})"
-                if [[ $? -eq 0 ]]
+                if networksetup -listnetworkserviceorder | grep -e 'Ethernet' -e 'LAN' | grep -qe "${interfacename})"
+                then
+                    if [[ ${activeOnly} -eq 1 ]]
+                    then
+                            echo "${interfacename}"
+                            ret=0
+                    elif isActive "${interfacename}"
+                    then
+                        echo "${interfacename}"
+                        ret=0
+                    fi
+                fi
+            fi
+        fi
+        interfacenumber=${interfacenumber}+1
+    done
+
+    return ${ret}
+}
+
+getTbInterfaces()
+{
+    local interfacebase="bridge"
+    local interfacename=""
+    local -i interfacenumber=${mininterface}
+    local -i ret=1
+
+    while [[ ${interfacenumber} -le ${maxinterface} ]]
+    do
+        interfacename="${interfacebase}${interfacenumber}"
+        if ifconfig "${interfacename}" >& /dev/null
+        then
+            if ! networksetup -getairportpower "${interfacename}" >&/dev/null
+            then
+                if networksetup -listnetworkserviceorder | grep -e 'Thunderbolt Bridge' | grep -qe "${interfacename})"
                 then
                     if [[ ${activeOnly} -eq 1 ]]
                     then
@@ -164,8 +203,7 @@ getVpnInterfaces()
     while [[ ${interfacenumber} -le ${maxinterface} ]]
     do
         interfacename="${interfacebase1}${interfacenumber}"
-        ifconfig "${interfacename}" >& /dev/null
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" >& /dev/null
         then
             if [[ ${activeOnly} -eq 1 ]]
             then
@@ -178,8 +216,7 @@ getVpnInterfaces()
             fi
         fi
         interfacename="${interfacebase2}${interfacenumber}"
-        ifconfig "${interfacename}" >& /dev/null
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" >& /dev/null
         then
             if [[ ${activeOnly} -eq 1 ]]
             then
@@ -192,8 +229,7 @@ getVpnInterfaces()
             fi
         fi
         interfacename="${interfacebase3}${interfacenumber}"
-        ifconfig "${interfacename}" >& /dev/null
-        if [[ $? -eq 0 ]]
+        if ifconfig "${interfacename}" >& /dev/null
         then
             if [[ ${activeOnly} -eq 1 ]]
             then
@@ -234,6 +270,10 @@ case "$1" in
         getWiredInterfaces
         retval=$?
         ;;
+    tb)
+        getTbInterfaces
+        retval=$?
+        ;;
     other)
         getOtherInterfaces
         retval=$?
@@ -249,6 +289,11 @@ case "$1" in
             retval=0
         fi
         getWiredInterfaces
+        if [ $? -eq 0 ]
+        then
+            retval=0
+        fi
+        getTbInterfaces
         if [ $? -eq 0 ]
         then
             retval=0
