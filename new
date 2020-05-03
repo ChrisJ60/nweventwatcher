@@ -22,7 +22,7 @@ hash -rf
 
 ############################################################
 # Constants
-readonly version="3.0.2"
+readonly version="3.0.3"
 readonly copyright="Copyright (c) Chris Jenkins 2019, 2020"
 
 readonly ladir=~/Library/LaunchAgents
@@ -179,6 +179,37 @@ declare powerA
 declare powerI
 integer powerAN
 integer powerIN
+
+#
+# avoid dependency on my 'isnumeric' binary
+#
+
+if ! command -v isnumeric >& /dev/null
+then
+
+isnumeric()
+{
+    local str
+    local tmp
+
+    if [[ $# -ne 1 ]]
+    then
+        return 2
+    fi
+    str="$1"
+    if [[ ${#str} -eq 0 ]] || [[ ${#str} -gt 10 ]]
+    then
+        return 1
+    fi
+    tmp=$(echo "${str}" | tr -d 0123456789)
+    if [[ "${tmp}" != "" ]]
+    then
+        return 1
+    fi
+    return 0
+}
+
+fi
 
 help_usage()
 {
@@ -1374,7 +1405,6 @@ netwatcherRunning()
     local rpid
     local -i npid
 
-#debugMsg "netwatcherRunning"
     if [[ ${forcepoll} -eq 0 ]]
     then
         return 3
@@ -1388,7 +1418,6 @@ netwatcherRunning()
     if checkFileR "${datadir}/${tmpdir}/${nwpidfile}"
     then
         spid=$(cat "${datadir}/${tmpdir}/${nwpidfile}")
-#debugMsg "spid = ${spid}"
         if [[ "${spid}" == "" ]]
         then
             rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
@@ -1397,7 +1426,6 @@ netwatcherRunning()
     fi
 
     rpid=$(pgrep -f -u "${myuid}" "${netwatcher}")
-#debugMsg "rpid = >${rpid}<"
     if [[ "${rpid}" == "" ]]
     then
         rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
@@ -1405,7 +1433,6 @@ netwatcherRunning()
     else
         npid=$(echo "${rpid}" | wc -l | awk '{ print $1 }')
     fi
-#debugMsg "npid = ${npid}"
     if [[ ${npid} -eq 0 ]]
     then
         rm -f "${datadir}/${tmpdir}/${nwpidfile}" >& /dev/null
@@ -1428,13 +1455,10 @@ waitforNetwatcherRunning()
     local -i n=0
     local nwpid
 
-#debugMsg "waitforNetwatcherRunning"
     while [[ ${n} -lt 30 ]]
     do
-#debugMsg "n = ${n}"
         if nwpid=$(netwatcherRunning)
         then
-#debugMsg "nwpid = ${nwpid}"
             echo "${nwpid}"
             return 0
         fi
@@ -1502,7 +1526,6 @@ sleepwatcherRunning()
     local rpid
     local -i npid
 
-#debugMsg "sleepwatcherRunning"
     if [[ ${forcepoll} -eq 0 ]]
     then
         return 3
@@ -1521,7 +1544,6 @@ sleepwatcherRunning()
     if checkFileR "${datadir}/${tmpdir}/${swpidfile}"
     then
         spid=$(cat "${datadir}/${tmpdir}/${swpidfile}")
-#debugMsg "spid = ${spid}"
         if [[ "${spid}" == "" ]]
         then
             rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
@@ -1530,7 +1552,6 @@ sleepwatcherRunning()
     fi
 
     rpid=$(pgrep -f -u "${myuid}" "${sleepwatcher} --pidfile ${datadir}/${tmpdir}/${swpidfile} --wakeup")
-#debugMsg "rpid = >${rpid}<"
     if [[ "${rpid}" == "" ]]
     then
         rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
@@ -1538,7 +1559,6 @@ sleepwatcherRunning()
     else
         npid=$(echo "${rpid}" | wc -l | awk '{ print $1 }')
     fi
-#debugMsg "npid = ${npid}"
     if [[ ${npid} -eq 0 ]]
     then
         rm -f "${datadir}/${tmpdir}/${swpidfile}" >& /dev/null
@@ -1561,13 +1581,10 @@ waitforSleepwatcherRunning()
     local -i n=0
     local swpid
 
-#debugMsg "waitforSleepwatcherRunning"
     while [[ ${n} -lt 30 ]]
     do
-#debugMsg "n = ${n}"
         if swpid=$(sleepwatcherRunning)
         then
-#debugMsg "swpid = ${swpid}"
             echo "${swpid}"
             return 0
         fi
@@ -1597,11 +1614,9 @@ startSleepwatcher()
         return 2
     fi
 
-#debugMsg "Starting sleepwatcher"
 
     swpid=$(sleepwatcherRunning)
     tret=$?
-#debugMsg "tret = ${tret}"
     if [[ ${tret} -ne 0 ]]
     then
         if [[ ${enablePower} -eq 0 ]]
@@ -1612,11 +1627,9 @@ startSleepwatcher()
         fi
         swpid=$(waitforSleepwatcherRunning)
         tret=$?
-#debugMsg "tret = ${tret}"
     fi
     if [[ ${tret} -eq 0 ]]
     then
-#debugMsg "pid = ${swpid}"
         echo "${swpid}"
         return 0
     fi
@@ -1745,13 +1758,11 @@ initPower()
             powerTS=$(date '+%s')
         fi
     fi
-#logMsg "DEBUG: initPower: curBattery = ${curBattery}, prvBattery = ${prvBattery}, powerTS = ${powerTS}"
     return 0
 }
 
 clearPower()
 {
-#logMsg "DEBUG: clearPower: curBattery = ${curBattery}"
     powerTS=0
     if [[ ${curBattery} -eq 0 ]]
     then
@@ -1773,13 +1784,11 @@ checkPower()
 
     if [[ ${powerTS} -gt 0 ]]
     then
-#logMsg "DEBUG: checkPower entry: powerTS = ${powerTS}"
         pevent=0
     elif [[ ${useSW} -eq 0 ]] && [[ ${forcepoll} -ne 0 ]] && [[ ${inSleep} -ne 0 ]]
     then
         if checkFileR "${datadir}/${tmpdir}/${batteryfile}"
         then
-#logMsg "DEBUG: checkPower: sw: on battery, curBattery = ${curBattery}"
             if [[ ${curBattery} -eq 1 ]]
             then
                 pevent=0
@@ -1787,12 +1796,9 @@ checkPower()
                 powerTS=$(date '+%s')
                 rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
             fi
-#        debugMsg "checkPower: sw: battery ${powerTS}/${curBattery}"
-#logMsg "DEBUG: checkPower: sw: battery ${powerTS}/${curBattery}"
         fi
         if checkFileR "${datadir}/${tmpdir}/${acpowerfile}"
         then
-#logMsg "DEBUG: checkPower: sw: on AC, curBattery = ${curBattery}"
             if [[ ${curBattery} -eq 0 ]]
             then
                 pevent=0
@@ -1800,11 +1806,8 @@ checkPower()
                 powerTS=$(date '+%s')
                 rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
             fi
-#        debugMsg "checkPower: sw: acpower ${powerTS}/${curBattery}"
-#logMsg "DEBUG: checkPower: sw: acpower ${powerTS}/${curBattery}"
         fi
     else
-#logMsg "DEBUG: checkPower : ERROR!"
         if pmset -g ac | grep -q 'No adapter'
         then
             if [[ ${curBattery} -eq 1 ]]
@@ -1813,7 +1816,6 @@ checkPower()
                 curBattery=0
                 powerTS=$(date '+%s')
                 rm -f "${datadir}/${tmpdir}/${acpowerfile}" >& /dev/null
-#        debugMsg "checkPower: poll: battery ${powerTS}/${curBattery}"
             fi
         else
             if [[ ${curBattery} -eq 0 ]]
@@ -1822,7 +1824,6 @@ checkPower()
                 curBattery=1
                 powerTS=$(date '+%s')
                 rm -f "${datadir}/${tmpdir}/${batteryfile}" >& /dev/null
-#        debugMsg "checkPower: poll: acpower ${powerTS}/${curBattery}"
             fi
         fi
     fi
@@ -1834,7 +1835,6 @@ checkPower()
         sleepQuantum=${acSQ}
     fi
 
-#logMsg "DEBUG: checkPower: pevent = ${pevent}"
     return ${pevent}
 }
 
@@ -2024,21 +2024,18 @@ checkWake()
 setinterrupt()
 {
     intr=0
-#    debugMsg "INTERRUPT received"
     return 0
 }
 
 setrefresh()
 {
     refresh=0
-#    debugMsg "REFRESH received"
     return 0
 }
 
 setrescan()
 {
     rescan=0
-#    debugMsg "RESCAN received"
     return 0
 }
 
@@ -2453,8 +2450,6 @@ monRefresh()
     local swpid
     local tmp
 
-#    debugMsg "REFRESH START"
-
     loadConfig
     if [[ $? -gt 1 ]]
     then
@@ -2514,8 +2509,6 @@ monRefresh()
         done
     fi
 
-#    debugMsg "${envDefault}:${dfltA}:${dfltAN}:${dfltI}:${dfltIN}"
-
     wakeA=""
     wakeAN=1
     checkDir "${datadir}/${actdir}/${envWake}"
@@ -2550,8 +2543,6 @@ monRefresh()
             fi
         done
     fi
-
-#    debugMsg "${envWake}:${wakeA}:${wakeAN}"
 
     powerA=""
     powerI=""
@@ -2599,8 +2590,6 @@ monRefresh()
             fi
         done
     fi
-
-#    debugMsg "${envBattery}:${powerA}:${powerAN}:${powerI}:${powerIN}"
 
     nEnv=0
     while read -r nwenv tmp
@@ -2664,8 +2653,6 @@ monRefresh()
             done
         fi
 
-#        debugMsg "${nEnv}:${curEnv[${nEnv}]}:${curA[${nEnv}]}:${curAN[${nEnv}]}:${curI[${nEnv}]}:${curIN[${nEnv}]}"
-
         if [[ "${first}" != "" ]]
         then
             curAct[${nEnv}]=1
@@ -2676,8 +2663,6 @@ monRefresh()
     done < "${datadir}/${cfgdir}/${envnames}"
     
     rm -f "${datadir}/${tmpdir}/${reffile}" >& /dev/null
-
-#    debugMsg "REFRESH END"
 
     return 0
 }
@@ -2815,7 +2800,6 @@ monGetActive()
             do
                 if [[ "${nwenv}" == "${curEnv[${i}]}" ]]
                 then
-#                    debugMsg "ACTIVE - ${nwenv}"
                     curAct[${i}]=0
                     i=${nEnv}
                 else
@@ -2964,7 +2948,6 @@ monDoPower()
     local msg
     local cmd
 
-#logMsg "DEBUG: monDoPower entry: curBattery = ${curBattery}"
     if [[ ${enablePower} -eq 1 ]]
     then
         return 0
@@ -3429,7 +3412,6 @@ listActions()
             then
                 if [[ ${script} -eq 0 ]]
                 then
-#                    cmd=$(echo "${cmd}" | sed -e "s/#E#/'#E#'/g" -e "s/#A#/'#A#'/g")
                     echo "'${me}' set ${en} ${ev} ${nfopt}${cmd}"
                 else
                     echo "${en} ${ev} ${notify} ${cmd}"
@@ -4695,7 +4677,6 @@ doInternal()
     while [[ ${intr} -ne 0 ]]
     do
         prvts=$(date '+%s')
-#        debugMsg "ACTION CYCLE START - time = ${prvts}"
 
 
         if checkFileRW "${datadir}/${tmpdir}/${pausefile}"
@@ -4985,10 +4966,6 @@ doInternal()
             delta=${curts}-${prvts}
             delta=${interval}-${delta}
 
-#            debugMsg "CURTS = ${curts}"
-#            debugMsg "PRVTS = ${prvts}"
-#            debugMsg "DELTA = ${delta}"
-
         else
 #
 # Event driven mode
@@ -5013,7 +4990,6 @@ doInternal()
             fi
         fi
 
-#        debugMsg "ACTION CYCLE END"
     done
 
     rm -f "${datadir}/${tmpdir}/${pausefile}" >& /dev/null
