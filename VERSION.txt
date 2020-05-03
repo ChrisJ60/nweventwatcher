@@ -1,1 +1,1 @@
-nweventwatcher version 2.9.9
+nweventwatcher version 3.0.2

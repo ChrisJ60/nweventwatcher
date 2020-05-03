@@ -22,7 +22,7 @@ hash -rf
 
 ############################################################
 # Constants
-readonly version="2.9.9"
+readonly version="3.0.2"
 readonly copyright="Copyright (c) Chris Jenkins 2019, 2020"
 
 readonly ladir=~/Library/LaunchAgents
@@ -45,6 +45,7 @@ readonly logcyclefile=logcycle
 readonly lastlogcyclefile=lastlogcycle
 readonly forcelogcyclefile=forcelogcycle
 readonly pausefile=pause
+readonly norescanfile=norescan
 readonly actionlog=actionlog
 readonly lanamef=laname
 readonly cmdfile=cmd
@@ -107,6 +108,7 @@ readonly integer minDarkWakeLag=30
 readonly integer swSettleFactor=20
 readonly integer minPause=15
 readonly integer maxPause=86400
+readonly integer foreverPause=999999999
 readonly minPauseInt="00:00:15"
 readonly maxPauseInt="24:00:00"
 
@@ -198,20 +200,20 @@ EOF
   ${me} set <environment> {a | i | b} [-silent] <command> [<param>]...
   ${me} set <environment> {a | i | b} -notify
   ${me} clear <environment> {a | i | b} [-verbose]
-  ${me} config [-clear | [-warntimeout <w>] [-killtimeout <k>]
+  ${me} config [-clear | -script | [-warntimeout <w>] [-killtimeout <k>]
 EOF
     if [[ ${enablePower} -eq 0 ]]
     then
     cat - <<EOF
-             [-actionlog <path>] [-acsq <a>] [-btsq <b>]
+              [-actionlog <path>] [-acsq <a>] [-btsq <b>]
 EOF
     else
     cat - <<EOF
-             [-actionlog <path>] [-acsq <a>]
+              [-actionlog <path>] [-acsq <a>]
 EOF
     fi
     cat - <<EOF
-             [-maxlogs <l>] [-logrotate <d>]]
+              [-maxlogs <l>] [-logrotate <d>]]
   ${me} install [<agenturl>] [-settle <s>] [-interval <i>] [-notify]
   ${me} uninstall
   ${me} init
@@ -221,8 +223,8 @@ EOF
   ${me} status [-verbose] [-asleep]
   ${me} start
   ${me} stop
-  ${me} pause <interval>
-  ${me} resume
+  ${me} pause [<interval>] [-norescan]
+  ${me} resume [-rescan | -norescan]
   ${me} cleanup [-verbose]
   ${me} log [-action] [-follow | -clear | -fno <n>]
   ${me} log {-rotate | -info}
@@ -519,6 +521,9 @@ ACTION COMMAND EXECUTION ENVIRONMENT
 Action commands are executed as background tasks. They should make no
 assumptions about their environment other than as follows:
 
+- PATH will be the system default PATH plus whatever may be defined
+  in /etc/paths.d
+
 - USER will be the username under which the monitor is running
 
 - HOME will be the home directory of \$USER
@@ -673,43 +678,46 @@ EOF
 help_config()
 {
     cat - <<EOF
-config [-clear | [-warntimeout <w>] [-killtimeout <k>] [-actionlog <path>]
+config [-clear | -script | [-warntimeout <w>] [-killtimeout <k>]
+        [-actionlog <path>] [-maxlogs <l>] [-logrotate <d>]
 EOF
     if [[ ${enablePower} -eq 0 ]]
     then
     cat - <<EOF
-       [-acsq <a>] [-btsq <b>] [-maxlogs <l>] [-logrotate <d>]]
+        [-acsq <a>] [-btsq <b>]]
 EOF
     else
     cat - <<EOF
-       [-acsq <a>] [-maxlogs <l>] [-logrotate <d>]]
+        [-acsq <a>]]
 EOF
     fi
     cat - <<EOF
 
-    Sets values for the command execution warning timer (-warntimeout),
-    the command execution kill timer (-killtimeout), the action log file
-    (-actionlog), the maximum number of retained log files (-maxlogs),
+    Displays/sets values for the command execution warning timer
+    (-warntimeout), the command execution kill timer (-killtimeout),
+    the action log file (-actionlog), the maximum number of retained
+    log files (-maxlogs), the log file rotate interval in days
 EOF
     if [[ ${enablePower} -eq 0 ]]
     then
     cat - <<EOF
-    the log file rotate interval in days (-logrotate), the AC sleep
-    quantum (-acsq) and the battery sleep quantum (-btsq) or clears all
-    values previously set (-clear). Individual values can be cleared
-    by specifying a value of '-'.
-EOF
-    else
-    cat - <<EOF
-    the log file rotate interval in days (-logrotate) and the AC sleep
-    quantum (-acsq) or clears all values previously set (-clear).
+    (-logrotate), the AC sleep quantum (-acsq) and the battery sleep
+    quantum (-btsq) or clears all values previously set (-clear).
     Individual values can be cleared by specifying a value of '-'.
 EOF
+    else
+    cat - <<EOF
+    (-logrotate), the AC sleep quantum (-acsq) or clears all values
+    previously set (-clear). Individual values can be cleared by
+    specifying a value of '-'.
+EOF
     fi
     cat - <<EOF
-
     Any value that does not have an explicitly defined value will use
     its default value (if any).
+
+    If '-script' is specified, a set of commands are output that will
+    re-create the current configuration.
 
     Timeout values must be between ${minTimeout} and ${maxTimeout}; a value of 0 for a timeout
     means 'no timeout'. Default values are ${dfltWarnTimeout} for warnings and ${dfltKillTimeout} for the
@@ -919,7 +927,7 @@ set <environment> {a | i | b} [-silent] <command> [<param>]...
         #E# - The environment name for the event.
         #A# - The new environment state for the event; A = active, I = inactive.
 
-    An absolute path should always be used when specifying the command.
+    An absolute path must be used when specifying the command.
 
     If macOS notifications are enabled then a notification will be sent
     whenever an event with an associated action is triggered occurs unless
@@ -984,17 +992,20 @@ EOF
 help_pause()
 {
     cat - <<EOF
-pause <interval>
+pause [<interval>] [-norescan]
 
-    Pauses the monitor/agent for the specified time interval. The interval
-    may be specified as an integer (number of seconds) or in the format
-    HH:MM:SS. The specified duration must be between ${minPause} and ${maxPause}
-    (${minPauseInt} and ${maxPauseInt}).
+    Pauses the monitor/agent for the specified time interval or forever if
+    no interval is specified. The interval may be specified as an integer
+    (number of seconds) or in the format HH:MM:SS. If specified, the value
+    must be between ${minPause} and ${maxPause} (${minPauseInt} and ${maxPauseInt}).
 
     While paused the monitor/agent will not detect, handle or log any events.
 
-    The monitor/agent can be resumed using the 'resume' command. Stopping
-    the monitor/agent clears any existing pause state.
+    The monitor/agent can be resumed early using the 'resume' command.
+    Stopping the monitor/agent clears any existing pause state.
+
+    Normally a rescan operation is performed when the monitor/agent
+    resumes but this can be suppressed using '-norescan'.
 EOF
     return 100
 }
@@ -1002,9 +1013,12 @@ EOF
 help_resume()
 {
     cat - <<EOF
-resume
+resume [-rescan | -norescan]
 
-    Resumes a currently paused monitor/agent.
+    Resumes a currently paused monitor/agent. Normally a rescan will be
+    performed after the monitor/agent resumes but this can be suppressed
+    by specifying '-norescan' or forced (if it was suppressed at pause
+    time) by specifying '-rescan'.
 EOF
     return 100
 }
@@ -2879,9 +2893,9 @@ monExec()
     then
         echo "----------------------------------------" >> "${actlog}" 2>/dev/null
         echo "${ts} initiated ${envnm}:${act}:${cmd}" >> "${actlog}" 2>/dev/null
-        ${cmd} >>"${actlog}" 2>&1 </dev/null &
+        eval ${cmd} >>"${actlog}" 2>&1 </dev/null &
     else
-        ${cmd} >&/dev/null </dev/null &
+        eval ${cmd} >&/dev/null </dev/null &
     fi
     ret=$?
     cpid=$!
@@ -3366,7 +3380,7 @@ listActions()
 
     if [[ ${script} -eq 0 ]]
     then
-        echo "${me} clear ${envAll} b"
+        echo "'${me}' clear ${envAll} b"
     fi
 
     envs=$(ls)
@@ -3415,8 +3429,8 @@ listActions()
             then
                 if [[ ${script} -eq 0 ]]
                 then
-                    cmd=$(echo "${cmd}" | sed -e "s/#E#/'#E#'/g" -e "s/#A#/'#A#'/g")
-                    echo "${me} set ${en} ${ev} ${nfopt}${cmd}"
+#                    cmd=$(echo "${cmd}" | sed -e "s/#E#/'#E#'/g" -e "s/#A#/'#A#'/g")
+                    echo "'${me}' set ${en} ${ev} ${nfopt}${cmd}"
                 else
                     echo "${en} ${ev} ${notify} ${cmd}"
                 fi
@@ -4305,8 +4319,6 @@ doRescan()
 {
     local res
     local pid
-    local -i count=0
-    local -i force=1
     local -i tret
 
     if [[ $# -gt 0 ]]
@@ -4439,17 +4451,23 @@ pauseMonitor()
         return 0
     fi
     pauseval=${tmp}
-    if [[ ${pauseval} -lt ${minPause} ]] || [[ ${pauseval} -gt ${maxPause} ]]
+    if [[ ${pauseval} -eq 0 ]]
     then
-        logMsg "ERROR: pause time out of range (${pauseval})"
-        return 0
+        pauseval=${foreverPause}
+        logMsg "pausing forever..."
+    else
+        if [[ ${pauseval} -lt ${minPause} ]] || [[ ${pauseval} -gt ${maxPause} ]]
+        then
+            logMsg "ERROR: pause time out of range (${pauseval})"
+            return 0
+        fi
+        logMsg "pausing for ${pauseval} seconds..."
     fi
-
-    logMsg "pausing for ${pauseval} seconds..."
     if [[ ${notify} -eq 0 ]]
     then
         sendNotification "Paused"
     fi
+
     now=$(date "+%s")
     resumetime=$((now+pauseval))
     while [[ ${now} -lt ${resumetime} ]] && checkFileRW "${datadir}/${tmpdir}/${pausefile}"
@@ -4467,6 +4485,13 @@ pauseMonitor()
     if [[ ${notify} -eq 0 ]]
     then
         sendNotification "Resumed"
+    fi
+
+    if checkFileRW "${datadir}/${tmpdir}/${norescanfile}"
+    then
+        rm -f "${datadir}/${tmpdir}/${norescanfile}" >& /dev/null
+    else
+        rescan=0
     fi
 
     return 0
@@ -4893,6 +4918,7 @@ doInternal()
                 curAct[${i}]=1
                 i=${i}+1
             done
+            rm -f "${datadir}/${tmpdir}/${norescanfile}" >& /dev/null
         fi
 
 #
@@ -5562,7 +5588,8 @@ doSet()
     local envt
     local tenv
     local elist
-    local cmd
+    local cmd=""
+    local cmdstr=""
     local tmp
     local -i notify=1
     local -i silent=1
@@ -5586,7 +5613,22 @@ doSet()
         silent=0
         shift
     fi
-    cmd="$1"
+
+    if [[ $# -gt 0 ]]
+    then
+        cmd="$1"
+        shift
+        if [[ "${cmd:0:1}" != "/" ]]
+        then
+            echo >&2 "error: '${cmd}' is not an absolute path"
+            return 1
+        fi
+        cmdstr="'${cmd}'"
+        for tmp in "$@"
+        do
+            cmdstr="${cmdstr} '${tmp}'"
+        done
+    fi
 
     if [[ ${notify} -eq 0 ]]
     then
@@ -5604,7 +5646,6 @@ doSet()
     then
         usage set
     fi
-
 
     if [[ ${#act} != 1 ]]
     then
@@ -5716,7 +5757,7 @@ doSet()
                     echo >&2 "error: unable to create '${datadir}/${actdir}/${tenv}/${a}/${cmdfile}'"
                     return 9
                 fi
-                echo "$@" > "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}" 2>&1
+                echo "${cmdstr}" > "${datadir}/${actdir}/${tenv}/${a}/${cmdfile}" 2>&1
                 didsomething=0
             fi
         done
@@ -6162,10 +6203,245 @@ doInit()
     return 0
 }
 
+listConfig()
+{
+    local tmp
+    local -i script=$1
+
+    if [[ ${script} -eq 0 ]]
+    then
+        echo "'${me}' config -clear"
+    fi
+
+    if [[ ! -e "${datadir}/${cfgdir}/${warntimeout}" ]]
+    then
+        tmp=" (default)"
+    else
+        tmp=""
+    fi
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${tmp}" == "" ]]
+        then
+            echo "'${me}' config -warntimeout ${cmdwarntimeout}"
+        fi
+    else
+        echo "warning timeout       : ${cmdwarntimeout}${tmp}"
+    fi
+
+    if [[ ! -e "${datadir}/${cfgdir}/${killtimeout}" ]]
+    then
+        tmp=" (default)"
+    else
+        tmp=""
+    fi
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${tmp}" == "" ]]
+        then
+            echo "'${me}' config -killtimeout ${cmdkilltimeout}"
+        fi
+    else
+        echo "kill timeout          : ${cmdkilltimeout}${tmp}"
+    fi
+
+    if [[ ! -e "${datadir}/${cfgdir}/${acsqfile}" ]]
+    then
+        tmp=" (default)"
+    else
+        tmp=""
+    fi
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${tmp}" == "" ]]
+        then
+            echo "'${me}' config -acsq ${acSQ}"
+        fi
+    else
+        echo "AC sleep quantum      : ${acSQ}${tmp}"
+    fi
+
+    if [[ ${enablePower} -eq 0 ]]
+    then
+        if [[ ! -e "${datadir}/${cfgdir}/${btsqfile}" ]]
+        then
+            tmp=" (default)"
+        else
+            tmp=""
+        fi
+        if [[ ${script} -eq 0 ]]
+        then
+            if [[ "${tmp}" == "" ]]
+            then
+                echo "'${me}' config -btsq ${btSQ}"
+            fi
+        else
+            echo "battery sleep quantum : ${btSQ}${tmp}"
+        fi
+    fi
+
+    if [[ ! -e "${datadir}/${cfgdir}/${numlogfile}" ]]
+    then
+        tmp=" (default)"
+    else
+        tmp=""
+    fi
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${tmp}" == "" ]]
+        then
+            echo "'${me}' config -maxlogs ${maxlogs}"
+        fi
+    else
+        echo "maximum log files     : ${maxlogs}${tmp}"
+    fi
+
+    if [[ ! -e "${datadir}/${cfgdir}/${logcyclefile}" ]]
+    then
+        tmp=" (default)"
+    else
+        tmp=""
+    fi
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${tmp}" == "" ]]
+        then
+            echo "'${me}' config -logrotate ${logcycle}"
+        fi
+    else
+        echo "log rotate            : ${logcycle}${tmp}"
+    fi
+
+    if [[ ${script} -eq 0 ]]
+    then
+        if [[ "${actlog}" != "" ]]
+        then
+            echo "'${me}' config -actionlog '${actlog}'"
+        fi
+    elif [[ "${actlog}" == "" ]]
+    then
+        echo "action log            : <not defined>"
+    elif checkFileRW "${actlog}" Y
+    then
+        echo "action log            : ${actlog}"
+    else
+        echo "action log            : INACCESSIBLE (${actlog})"
+    fi
+
+    return 0
+}
+
+clearConfig()
+{
+    local -i ret=0
+    local -i tret=0
+    local -i didsometing=1
+
+    checkFileRW "${datadir}/${cfgdir}/${warntimeout}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${warntimeout}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${warntimeout}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${killtimeout}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${killtimeout}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${killtimeout}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${acsqfile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${acsqfile}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${acsqfile}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${btsqfile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${btsqfile}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${btsqfile}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${numlogfile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${numlogfile}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${numlogfile}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${logcyclefile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${logcyclefile}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${logcyclefile}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${tmpdir}/${lastlogcyclefile}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${tmpdir}/${lastlogcyclefile}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${tmpdir}/${lastlogcyclefile}" >& /dev/null
+        didsomething=0
+    fi
+
+    checkFileRW "${datadir}/${cfgdir}/${actionlog}"
+    tret=$?
+    if [[ ${tret} -gt 1 ]]
+    then
+        echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${actionlog}'"
+        ret=${ret}+1
+    elif [[ ${tret} -eq 0 ]]
+    then
+        rm -f "${datadir}/${cfgdir}/${actionlog}" >& /dev/null
+        didsomething=0
+    fi
+
+    echo ${didsomething}
+    return ${ret}
+}
+
 doConfig()
 {
     local tmp
     local -i fclear=1
+    local -i fscript=1
     local -i facsq=1
     local -i acsq=0
     local -i fbtsq=1
@@ -6193,60 +6469,7 @@ doConfig()
 
     if [[ $# -eq 0 ]]
     then
-        if [[ ! -e "${datadir}/${cfgdir}/${warntimeout}" ]]
-        then
-            tmp=" (default)"
-        else
-            tmp=""
-        fi
-        echo "warning timeout       : ${cmdwarntimeout}${tmp}"
-        if [[ ! -e "${datadir}/${cfgdir}/${killtimeout}" ]]
-        then
-            tmp=" (default)"
-        else
-            tmp=""
-        fi
-        echo "kill timeout          : ${cmdkilltimeout}${tmp}"
-        if [[ ! -e "${datadir}/${cfgdir}/${acsqfile}" ]]
-        then
-            tmp=" (default)"
-        else
-            tmp=""
-        fi
-        echo "AC sleep quantum      : ${acSQ}${tmp}"
-        if [[ ${enablePower} -eq 0 ]]
-        then
-            if [[ ! -e "${datadir}/${cfgdir}/${btsqfile}" ]]
-            then
-                tmp=" (default)"
-            else
-                tmp=""
-            fi
-            echo "battery sleep quantum : ${btSQ}${tmp}"
-        fi
-        if [[ ! -e "${datadir}/${cfgdir}/${numlogfile}" ]]
-        then
-            tmp=" (default)"
-        else
-            tmp=""
-        fi
-        echo "maximum log files     : ${maxlogs}${tmp}"
-        if [[ ! -e "${datadir}/${cfgdir}/${logcyclefile}" ]]
-        then
-            tmp=" (default)"
-        else
-            tmp=""
-        fi
-        echo "log rotate            : ${logcycle}${tmp}"
-        if [[ "${actlog}" == "" ]]
-        then
-            echo "action log            : <not defined>"
-        elif checkFileRW "${actlog}" Y
-        then
-            echo "action log            : ${actlog}"
-        else
-            echo "action log            : INACCESSIBLE (${actlog})"
-        fi
+        listConfig 1
         return 0
     fi
 
@@ -6256,14 +6479,25 @@ doConfig()
             "-clear")
                 if [[ ${fwarn} -eq 0 ]] || [[ ${fkill} -eq 0 ]] || \
                    [[ ${facsq} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]] || \
-                   [[ ${fxpath} -eq 0 ]] || [[ ${fnlogs} -eq 0 ]]
+                   [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || \
+                   [[ ${fxpath} -eq 0 ]] ||[[ ${fnlogs} -eq 0 ]]
                 then
                     usage config
                 fi
                 fclear=0
                 ;;
+            "-script")
+                if [[ ${fwarn} -eq 0 ]] || [[ ${fkill} -eq 0 ]] || \
+                   [[ ${facsq} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]] || \
+                   [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || \
+                   [[ ${fxpath} -eq 0 ]] ||[[ ${fnlogs} -eq 0 ]]
+                then
+                    usage config
+                fi
+                fscript=0
+                ;;
             "-actionlog")
-                if [[ ${fclear} -eq 0 ]] || [[ ${fxpath} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${fxpath} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6276,7 +6510,7 @@ doConfig()
                 xpath="$1"
                 ;;
             "-acsq")
-                if [[ ${fclear} -eq 0 ]] || [[ ${facsq} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${facsq} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6304,7 +6538,7 @@ doConfig()
                 fi
                 ;;
             "-btsq")
-                if [[ ${fclear} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${fbtsq} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6337,7 +6571,7 @@ doConfig()
                 fi
                 ;;
             "-warntimeout")
-                if [[ ${fclear} -eq 0 ]] || [[ ${fwarn} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${fwarn} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6365,7 +6599,7 @@ doConfig()
                 fi
                 ;;
             "-killtimeout")
-                if [[ ${fclear} -eq 0 ]] || [[ ${fkill} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${fkill} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6393,7 +6627,7 @@ doConfig()
                 fi
                 ;;
             "-maxlogs")
-                if [[ ${fclear} -eq 0 ]] || [[ ${fnlogs} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${fnlogs} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6421,7 +6655,7 @@ doConfig()
                 fi
                 ;;
             "-logrotate")
-                if [[ ${fclear} -eq 0 ]] || [[ ${flcycle} -eq 0 ]]
+                if [[ ${fscript} -eq 0 ]] || [[ ${fclear} -eq 0 ]] || [[ ${flcycle} -eq 0 ]]
                 then
                     usage config
                 fi
@@ -6457,94 +6691,17 @@ doConfig()
 
     if [[ ${fclear} -eq 0 ]]
     then
-        checkFileRW "${datadir}/${cfgdir}/${warntimeout}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
+        if tmp=$(clearConfig 2>&1)
         then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${warntimeout}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${warntimeout}" >& /dev/null
-            didsomething=0
+            didsomething=${tmp}
+        else
+            echo >&2 "${tmp}"
+            ret=1
         fi
-        checkFileRW "${datadir}/${cfgdir}/${killtimeout}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${killtimeout}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${killtimeout}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${cfgdir}/${acsqfile}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${acsqfile}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${acsqfile}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${cfgdir}/${btsqfile}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${btsqfile}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${btsqfile}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${cfgdir}/${numlogfile}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${numlogfile}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${numlogfile}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${cfgdir}/${logcyclefile}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${logcyclefile}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${logcyclefile}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${tmpdir}/${lastlogcyclefile}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${tmpdir}/${lastlogcyclefile}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${tmpdir}/${lastlogcyclefile}" >& /dev/null
-            didsomething=0
-        fi
-        checkFileRW "${datadir}/${cfgdir}/${actionlog}"
-        ret=$?
-        if [[ ${ret} -gt 1 ]]
-        then
-            echo >&2 "error: unable to remove '${datadir}/${cfgdir}/${actionlog}'"
-            return 1
-        elif [[ ${ret} -eq 0 ]]
-        then
-            rm -f "${datadir}/${cfgdir}/${actionlog}" >& /dev/null
-            didsomething=0
-        fi
+    elif [[ ${fscript} -eq 0 ]]
+    then
+        listConfig 0
+        return 0
     else
         if [[ ${fwarn} -eq 1 ]]
         then
@@ -6575,6 +6732,11 @@ doConfig()
                     rm -f "${datadir}/${cfgdir}/${actionlog}" >& /dev/null
                 fi
             else
+                if [[ "${xpath:0:1}" != "/" ]]
+                then
+                    echo >&2 "error: '${xpath}' is not an absolute path"
+                    return 4
+                fi
                 checkFileRW "${xpath}" Y
                 ret=$?
                 if [[ ${ret} -gt 1 ]]
@@ -6766,7 +6928,7 @@ doConfig()
         fi
     fi
 
-    return 0
+    return ${ret}
 }
 
 cleanupInternal()
@@ -6842,16 +7004,45 @@ doCleanup()
 
 doPause()
 {
-    local tmp
+    local tmp=""
     local -i pausetime=0
+    local -i norescan=1
 
-    if [[ $# -ne 1 ]]
+    if [[ $# -gt 2 ]]
     then
         usage pause
+    elif [[ $# -eq 2 ]]
+    then
+        if [[ "$2" == "-norescan" ]]
+        then
+            norescan=0
+        else
+            usage pause
+        fi
+        tmp="$1"
+    elif [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-norescan" ]]
+        then
+            norescan=0
+        else
+            tmp="$1"
+        fi
+    else
+        tmp=""
     fi
-    if ! pausetime=$(validPauseInterval "$1")
+
+    if [[ "${tmp}" != "" ]]
     then
-        usage pause
+        if [[ "${tmp}" == "-signed" ]] || [[ "${tmp}" == "-s" ]] || \
+           [[ "${tmp}" == "-float" ]] || [[ "${tmp}" == "-f" ]] 
+        then
+            usage pause
+        fi
+        if ! pausetime=$(validPauseInterval "${tmp}")
+        then
+            usage pause
+        fi
     fi
     if ! tmp=$(doStatus 2>&1)
     then
@@ -6870,6 +7061,14 @@ doPause()
             return 1
         fi
         echo "${pausetime}" > "${datadir}/${tmpdir}/${pausefile}" 2>/dev/null
+        if [[ ${norescan} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${tmpdir}/${norescanfile}" Y
+            then
+                echo >&2 "error: unable to create '${datadir}/${tmpdir}/${norescanfile}'"
+                return 2
+            fi
+        fi
     fi
 
     return 0
@@ -6878,11 +7077,26 @@ doPause()
 doResume()
 {
     local tmp
+    local pid
+    local -i norescan=-1
+    local -i tret
 
-    if [[ $# -ne 0 ]]
+    if [[ $# -gt 1 ]]
     then
         usage resume
+    elif [[ $# -eq 1 ]]
+    then
+        if [[ "$1" == "-norescan" ]]
+        then
+            norescan=0
+        elif [[ "$1" == "-rescan" ]]
+        then
+            norescan=1
+        else
+            usage resume
+        fi
     fi
+
     if ! tmp=$(doStatus 2>&1)
     then
         tmp=$(echo "${tmp}" | sed -e 's/^.*: //')
@@ -6893,15 +7107,33 @@ doResume()
     then
         tmp=$(echo "${tmp}" | sed -e 's/^.*: //' -e 's/ .*$//')
         echo "info: ${tmp} is not paused"
-    else
-        checkFileRW "${datadir}/${tmpdir}/${pausefile}"
-        if [[ $? -gt 1 ]]
-        then
-            echo >&2 "error: unable to access '${datadir}/${tmpdir}/${pausefile}'"
-            return 1
-        fi
-        rm -f "${datadir}/${tmpdir}/${pausefile}" >&/dev/null
+        return 0
     fi
+
+#   Do we override rescan?
+
+    if [[ ${norescan} -ge 0 ]]
+    then
+        if [[ ${norescan} -eq 0 ]]
+        then
+            if ! checkFileRW "${datadir}/${tmpdir}/${norescanfile}" Y
+            then
+                echo >&2 "error: unable to create '${datadir}/${tmpdir}/${norescanfile}'"
+                return 1
+            fi
+        else
+            rm -f "${datadir}/${tmpdir}/${norescanfile}" >& /dev/null
+        fi
+    fi
+
+    checkFileRW "${datadir}/${tmpdir}/${pausefile}"
+    if [[ $? -gt 1 ]]
+    then
+        echo >&2 "error: unable to access '${datadir}/${tmpdir}/${pausefile}'"
+        return 1
+    fi
+    rm -f "${datadir}/${tmpdir}/${pausefile}" >&/dev/null
+
     return 0
 }
 

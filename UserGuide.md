@@ -54,7 +54,8 @@ This utility uses:
 **INSTALLATION**
 
 1.  Make sure that your PATH setting includes both /usr/local/bin and
-    /usr/local/sbin.
+    /usr/local/sbin and that the system is set to include these in the
+    default PATH (appropriate files in /etc/paths.d).
 
 2.  Copy the main script to /usr/local/sbin (recommended) or /usr/local/bin.
     The script's default name is 'new' (Network Event Watcher) but you
@@ -206,7 +207,8 @@ after the current set of actions have finished processing.
 Action commands are executed as background tasks. They should make no
 assumptions about their environment other than as follows:
 
-- **PATH** will be /usr/local/bin:/usr/local/sbin:/usr/bin/:/usr/sbin:/bin:/sbin
+- **PATH** will be the system default PATH plus whatever may be defined
+  in /etc/paths.d
 
 - **USER** will be the username under which the monitor is running
 
@@ -254,7 +256,7 @@ as action commands, bear in mind the following:
 
   new clear environment {a | i | b} [-verbose]
 
-  new config [-clear | [-warntimeout *w*] [-killtimeout *k*]
+  new config [-clear | -script | [-warntimeout *w*] [-killtimeout *k*]
              [-actionlog *path*] [-acsq *a*] [-btsq *b*]
              [-maxlogs *l*]]
              
@@ -276,7 +278,7 @@ as action commands, bear in mind the following:
 
   new stop
   
-  new pause *interval*
+  new pause [*interval*] [-norescan]
   
   new resume
 
@@ -368,19 +370,21 @@ Removes the specified action(s) for the named environment/event(s).
     If a monitor or agent is running, changes made with the **clear** command will
     not take effect until a **refresh** command has been issued.
 
-**config [-clear | [-warntimeout *w*] [-killtimeout *k*] [-actionlog *path*]
+**config [-clear | -script | [-warntimeout *w*] [-killtimeout *k*] [-actionlog *path*]
        [-acsq *a*] [-btsq *b*] [-maxlogs *l*] [-logrotate *d*]]**
 
-Sets values for the command execution warning timer (-warntimeout),
-the command execution kill timer (-killtimeout), the action log file
-(-actionlog), the maximum number of retained log files (-maxlogs),
-the log file rotate interval in days (-logrotate), the AC sleep
-quantum (-acsq) and the battery sleep quantum (-btsq) or clears all
-values previously set (-clear). Individual values can be cleared
-by specifying a value of '-'.
-
+Displays/sets values for the command execution warning timer
+(-warntimeout), the command execution kill timer (-killtimeout),
+the action log file (-actionlog), the maximum number of retained
+log files (-maxlogs), the log file rotate interval in days
+(-logrotate), the AC sleep quantum (-acsq) and the battery sleep
+quantum (-btsq) or clears all values previously set (-clear).
+Individual values can be cleared by specifying a value of '-'.
 Any value that does not have an explicitly defined value will use
 its default value (if any).
+
+If '-script' is specified, a set of commands are output that will
+re-create the current configuration.
 
 Timeout values must be between 0 and 180; a value of 0 for a timeout
 means 'no timeout'. Default values are 30 for warnings and 60 for the
@@ -499,21 +503,27 @@ Starts the agent if it is configured and not already running.
 
 Stops the monitor/agent if it is running.
 
-**pause interval**
+**pause [*interval*] [-norescan]**
 
-Pauses the monitor/agent for the specified time interval. The interval
-may be specified as an integer (number of seconds) or in the format
-HH:MM:SS. The specified duration must be between 15 and 86400
-(00:00:15 and 24:00:00).
+Pauses the monitor/agent for the specified time interval or forever if
+no interval is specified. The interval may be specified as an integer
+(number of seconds) or in the format HH:MM:SS. If specified, the value
+must be between 15 and 86400 (00:00:15 and 24:00:00).
 
 While paused the monitor/agent will not detect, handle or log any events.
 
-The monitor/agent can be resumed using the 'resume' command. Stopping
+The monitor/agent can be resumed early using the 'resume' command. Stopping
 the monitor/agent clears any existing pause state.
 
-**resume**
+Normally a rescan operation is performed when the monitor/agent
+resumes but this can be suppressed using '-norescan'.
 
-Resumes a currently paused monitor/agent.
+**resume [-rescan | -norescan]**
+
+Resumes a currently paused monitor/agent. Normally a rescan will be
+performed after the monitor/agent resumes but this can be suppressed
+by specifying '-norescan' or forced (if it was suppressed at pause
+time) by specifying '-rescan'.
 
 **cleanup**
 
@@ -596,7 +606,7 @@ This script is responsible for:
    WiFi and wired network connections. Multiple environments may be active
    concurrently.
 
-Syntax and specification
+_Syntax and specification_
 
 The syntax for invoking the script is as follows. This is the minimum syntax;
 the script may support additional functionality over and above what is specified
@@ -649,7 +659,7 @@ network then the output would look like this:
 
 The order in which the active environments are displayed is not significant.
 
-Exit codes
+_Exit codes_
 
 The 'list' command should always return a zero exit code unless it is unable to
 successfully generate the list, in which case the exit code should be > 0.
